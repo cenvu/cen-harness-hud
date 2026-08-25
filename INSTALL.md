@@ -13,6 +13,20 @@
   AGY (Antigravity CLI), Codex CLI, Pi Coding Agent, and/or Herdr.
   CEN HUD does not install, bundle, authenticate, or migrate any harness.
 
+## OpenCode notes
+
+OpenCode support has NO separate `--opencode` installer component. Its
+sidebar card is installed/configured by the **Herdr** component:
+
+```sh
+./install.sh --herdr
+```
+
+OpenCode must already be installed (by you) if you want to use that card;
+CEN HUD does not install or authenticate OpenCode. The card shows only the
+lifecycle state that Herdr itself detects — CEN HUD publishes no OpenCode
+metadata of its own.
+
 ## Install
 
 ```sh

@@ -43,6 +43,13 @@ PI_ROWS = [
     ["agent", "state_text"],
     [{"token": "$cen_ds_balance", "fg": "#6fb5b7", "bold": True}],
 ]
+# OpenCode card uses Herdr-native lifecycle truth: Herdr detects the
+# opencode agent and renders its native state; CEN publishes no OpenCode
+# metadata.
+OPENCODE_ROWS = [
+    ["workspace", "tab"],
+    ["agent", "state_text"],
+]
 
 # desired TOML literal INNER lines (the wrapper `key = [` / `]` is added by
 # patching.insert_toml_key)
@@ -76,6 +83,10 @@ ROWS_LITERAL = {
         "  [",
         '    { token = "$cen_ds_balance", fg = "#6fb5b7", bold = true }',
         "  ]",
+    ],
+    "opencode": [
+        '  ["workspace", "tab"],',
+        '  ["agent", "state_text"]',
     ],
 }
 ROWS_TABLE = ("ui", "sidebar", "agents", "rows_by_agent")
@@ -199,7 +210,8 @@ def plan(ctx) -> dict:
             f"herdr: cannot parse {cfg_path} ({e}); fail-closed"
         )
 
-    desired_values = {"agy": AGY_ROWS, "codex": CODEX_ROWS, "pi": PI_ROWS}
+    desired_values = {"agy": AGY_ROWS, "codex": CODEX_ROWS, "pi": PI_ROWS,
+                      "opencode": OPENCODE_ROWS}
     node = parsed_ok
     for t in ROWS_TABLE:
         node = node.get(t) if isinstance(node, dict) else None

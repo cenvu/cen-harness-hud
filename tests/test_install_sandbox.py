@@ -184,6 +184,7 @@ class InstallTests(Base):
         self.assertEqual(len(rows["agy"]), 4)
         self.assertEqual(len(rows["codex"]), 5)
         self.assertEqual(len(rows["pi"]), 3)
+        self.assertEqual(len(rows["opencode"]), 2)
  # AGY/Pi rows unchanged; Codex card is exactly 5 rows with new tokens
         self.assertEqual(
             rows["codex"],
@@ -210,6 +211,14 @@ class InstallTests(Base):
                 ["workspace", "tab"],
                 ["agent", "state_text"],
                 [{"token": "$cen_ds_balance", "fg": "#6fb5b7", "bold": True}],
+            ],
+        )
+ # OpenCode card: PURE native Herdr state, exactly two rows, zero CEN tokens
+        self.assertEqual(
+            rows["opencode"],
+            [
+                ["workspace", "tab"],
+                ["agent", "state_text"],
             ],
         )
         man = self.assertPrivacy()
@@ -395,6 +404,206 @@ class HerdrConflictTests(Base):
             self.assertEqual(f.read(), "// my own extension")
 
 
+class OpenCodeRowTests(Base):
+    """CONFIG_ONLY native OpenCode state card (synthetic only).
+
+    Herdr renders OpenCode lifecycle state natively (discovery audit);
+    CEN owns only
+    the rows_by_agent.opencode shape. No runtime adapter, no tokens.
+    """
+
+    ROWS_TABLE = "[ui.sidebar.agents.rows_by_agent]\n"
+    OPENCODE = [
+        ["workspace", "tab"],
+        ["agent", "state_text"],
+    ]
+    AGY_TOML = (
+        'agy = [\n  ["workspace", "tab"],\n  ["agent", "state_text"],\n'
+        '  [\n    { token = "$cen_agy_identity", bold = true }\n  ],\n'
+        '  [\n    { token = "$cen_agy_quota", bold = true }\n  ]\n]\n'
+    )
+    CODEX_TOML = (
+        'codex = [\n  ["workspace", "tab"],\n  ["agent", "state_text"],\n'
+        '  [\n    { token = "$cen_codex_identity", bold = true }\n  ],\n'
+        '  [\n    { token = "$cen_codex_window_1", bold = true }\n  ],\n'
+        '  [\n    { token = "$cen_codex_window_2", bold = true }\n  ]\n]\n'
+    )
+    PI_TOML = (
+        'pi = [\n  ["workspace", "tab"],\n  ["agent", "state_text"],\n'
+        '  [\n    { token = "$cen_ds_balance", fg = "#6fb5b7", '
+        'bold = true }\n  ]\n]\n'
+    )
+
+    def _rows(self):
+        return tomllib.loads(self.read(
+            ".config/herdr/config.toml")
+        )["ui"]["sidebar"]["agents"]["rows_by_agent"]
+
+    def _doctor_row_line(self, stdout):
+        for line in stdout.splitlines():
+            if "herdr:rows[opencode]" in line:
+                return line.strip()
+        return None
+
+    # A — fresh config
+    def test_fresh_config_includes_exact_two_row_opencode(self):
+        r = self.install("--herdr")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        parsed = tomllib.loads(self.read(".config/herdr/config.toml"))
+        rows = parsed["ui"]["sidebar"]["agents"]["rows_by_agent"]
+        self.assertEqual(rows["opencode"], self.OPENCODE)
+        self.assertEqual(len(rows["opencode"]), 2)
+
+    def _existing_config_with(self, opencode_toml, mode=0o644):
+        content = (
+            "# user header comment\n"
+            '[ui.sidebar]\ncustom_note = "keep me"\n'
+            '[ui.sidebar.agents]\nrow_gap = 2\n'
+            + self.ROWS_TABLE
+            + self.AGY_TOML
+            + self.CODEX_TOML
+            + self.PI_TOML
+            + "# user inline comment\n"
+            + opencode_toml
+        )
+        return self.write(".config/herdr/config.toml", content, mode)
+
+    # B (+ F, G, H, I) — absent → exact insert; everything else preserved
+    def test_absent_opencode_inserted_unrelated_content_preserved(self):
+        cfg_path = self._existing_config_with("")
+        import hashlib
+        with open(cfg_path, "rb") as f:
+            before = f.read()
+        r = self.install("--herdr")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        text = self.read(".config/herdr/config.toml")
+        parsed = tomllib.loads(text)
+        rows = parsed["ui"]["sidebar"]["agents"]["rows_by_agent"]
+        self.assertEqual(rows["opencode"], self.OPENCODE)
+ # unrelated config preserved byte-for-byte except the inserted block
+        after = text.encode()
+        self.assertEqual(
+            hashlib.sha256(
+                after.replace(
+                    b'opencode = [\n  ["workspace", "tab"],\n'
+                    b'  ["agent", "state_text"]\n]\n', b"")).hexdigest(),
+            hashlib.sha256(before).hexdigest())
+ # explicit semantic preservation
+        self.assertEqual(parsed["ui"]["sidebar"]["agents"]["row_gap"], 2)
+        self.assertEqual(parsed["ui"]["sidebar"]["custom_note"], "keep me")
+        self.assertEqual(len(rows["agy"]), 4)
+        self.assertEqual(len(rows["codex"]), 5)
+        self.assertEqual(len(rows["pi"]), 3)
+        self.assertIn("# user header comment", text)
+        self.assertIn("# user inline comment", text)
+
+    # C — exact shape → no-op
+    def test_exact_opencode_rows_noop(self):
+        self._existing_config_with(
+            'opencode = [\n  ["workspace", "tab"],\n'
+            '  ["agent", "state_text"]\n]\n')
+        r = self.install("--herdr")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("rows[opencode] already CEN-owned", r.stdout)
+        self.assertEqual(self._rows()["opencode"], self.OPENCODE)
+
+    # D — foreign custom value → CONFLICT, bytes unchanged
+    def test_foreign_custom_opencode_conflicts(self):
+        foreign = 'opencode = [["my", "custom", "rows"]]\n'
+        cfg_path = self._existing_config_with(foreign)
+        import hashlib
+        with open(cfg_path, "rb") as f:
+            before = f.read()
+        r = self.install("--herdr")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("CONFLICT", r.stdout)
+        self.assertIn("opencode", r.stdout)
+        with open(cfg_path, "rb") as f:
+            self.assertEqual(f.read(), before)
+
+    # E — near-match (third row added) → CONFLICT
+    def test_near_match_opencode_conflicts(self):
+        near = ('opencode = [\n  ["workspace", "tab"],\n'
+                '  ["agent", "state_text"],\n'
+                '  [{ token = "$my_own_status", bold = true }]\n]\n')
+        cfg_path = self._existing_config_with(near)
+        import hashlib
+        with open(cfg_path, "rb") as f:
+            before = f.read()
+        r = self.install("--herdr")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("CONFLICT", r.stdout)
+        with open(cfg_path, "rb") as f:
+            self.assertEqual(f.read(), before)
+
+    # J/K/L — doctor ownership checks
+    def _doctor(self):
+        return self.cli("doctor")
+
+    def test_doctor_pass_on_exact_opencode_rows(self):
+        self._existing_config_with(
+            'opencode = [\n  ["workspace", "tab"],\n'
+            '  ["agent", "state_text"]\n]\n')
+        r = self._doctor()
+        line = self._doctor_row_line(r.stdout)
+        self.assertIsNotNone(line, r.stdout)
+        self.assertTrue(line.startswith("PASS"), line)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_doctor_skips_absent_opencode_rows(self):
+        self._existing_config_with("")
+        r = self._doctor()
+        line = self._doctor_row_line(r.stdout)
+        self.assertIsNotNone(line, r.stdout)
+        self.assertTrue(line.startswith("SKIP"), line)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_doctor_fails_foreign_opencode_rows(self):
+        self._existing_config_with('opencode = [["foreign"]]\n')
+        r = self._doctor()
+        line = self._doctor_row_line(r.stdout)
+        self.assertIsNotNone(line, r.stdout)
+        self.assertTrue(line.startswith("FAIL"), line)
+        self.assertEqual(r.returncode, 1)
+
+    # M — uninstall restores pre-install bytes and mode
+    def test_uninstall_restores_pre_opencode_config_bytes_and_mode(self):
+        original = ("[ui.sidebar.agents]\nrow_gap = 3\n"
+                    + self.ROWS_TABLE + self.AGY_TOML)
+        cfg_path = self.write(".config/herdr/config.toml", original,
+                              mode=0o640)
+        assert self.install("--herdr").returncode == 0
+        self.assertEqual(self._rows()["opencode"], self.OPENCODE)
+        r = self.cli("uninstall")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("restored:", r.stdout)
+        with open(cfg_path) as f:
+            self.assertEqual(f.read(), original)
+        self.assertEqual(stat.S_IMODE(os.stat(cfg_path).st_mode), 0o640)
+
+    # N — rollback after induced failure restores bytes and mode
+    def test_rollback_after_induced_failure_restores_original(self):
+        import unittest.mock
+        from installer import transaction as txn
+        from installer.paths import Context
+
+        original = ("[ui.sidebar.agents]\nrow_gap = 5\n"
+                    + self.ROWS_TABLE + self.PI_TOML)
+        cfg_path = self.write(".config/herdr/config.toml", original,
+                              mode=0o640)
+        fake_ctx = Context(home=self.home, source_root=REPO)
+        with unittest.mock.patch.object(
+                txn, "_verify_action",
+                side_effect=ComponentError("induced")):
+            rc = txn.run_install(fake_ctx, [("herdr", True)],
+                                 out=lambda *_: None)
+        self.assertEqual(rc, 1)
+        with open(cfg_path) as f:
+            self.assertEqual(f.read(), original)
+        self.assertEqual(stat.S_IMODE(os.stat(cfg_path).st_mode), 0o640)
+        self.assertFalse(os.path.exists(self.manifest_path()))
+
+
 class TransactionTests(Base):
     def test_mid_install_failure_rolls_back(self):
         self.write(".gemini/antigravity-cli/settings.json",
@@ -524,6 +733,7 @@ class HardeningTests(Base):
         self.assertEqual(len(rows["agy"]), 4)
         self.assertEqual(len(rows["codex"]), 5)
         self.assertEqual(len(rows["pi"]), 3)
+        self.assertEqual(len(rows["opencode"]), 2)
         man = self.read_manifest()
         herdr_records = [pf for pf in man["patched_files"]
                          if pf["path"].endswith("herdr/config.toml")]
@@ -961,8 +1171,10 @@ class InstallerMigrationTests(Base):
  # (valid TOML proven by tomllib.loads above; exactly one bare "]"
  # closer per top-level row block: agy, codex, pi)
         self.assertNotIn("$cen_codex_summary", text)
+ # exactly one bare "]" closer per top-level row block: agy, codex, pi,
+ # and the newly inserted opencode block
         self.assertEqual(
-            sum(1 for ln in text.splitlines() if ln.strip() == "]"), 6)
+            sum(1 for ln in text.splitlines() if ln.strip() == "]"), 7)
  # 2./3./4. unrelated content byte-preserved
         self.assertEqual(rows["agy"][0], ["workspace", "tab"])
         self.assertEqual(len(rows["agy"]), 4)

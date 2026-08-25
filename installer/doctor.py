@@ -8,7 +8,7 @@ import os
 from . import discover, manifest, patching
 from .components.agy import desired_command
 from .components.codex import STATUS_LINE_DESIRED
-from .components.herdr import AGY_ROWS, CODEX_ROWS, PI_ROWS
+from .components.herdr import AGY_ROWS, CODEX_ROWS, OPENCODE_ROWS, PI_ROWS
 from .paths import Context
 
 
@@ -156,7 +156,8 @@ def run_doctor(ctx: Context, out=print) -> int:
                 node = node.get(t) if isinstance(node, dict) else None
             rows = node if isinstance(node, dict) else {}
             for key, want in (("agy", AGY_ROWS), ("codex", CODEX_ROWS),
-                              ("pi", PI_ROWS)):
+                              ("pi", PI_ROWS),
+                              ("opencode", OPENCODE_ROWS)):
                 if key not in rows:
                     rec(f"herdr:rows[{key}]", "SKIP", "absent")
                 elif rows[key] == want:

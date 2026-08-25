@@ -18,6 +18,7 @@ no resident daemon of its own, no database.
 | **AGY** (Antigravity CLI) | Native statusline footer + Herdr sidebar card | Account identity/plan, four quota pools (Gemini 5H/W, Claude/GPT 5H/W), reset countdowns |
 | **Codex CLI** | Native TUI status line, one-shot CLI helper, Herdr sidebar card | Model/context rows; structured short/long rate-limit remaining percentages; Herdr card adds identity/plan plus both structured window LEFT % with reset countdown snapshots |
 | **Pi Coding Agent** | Native Pi footer widget | DeepSeek key fingerprint and PAYG balance |
+| **OpenCode** | Herdr sidebar card (requires Herdr) | Herdr-native lifecycle state. State is supplied by Herdr's own OpenCode detection, not a CEN OpenCode publisher. Live validation observed idle/working/done; other Herdr-native states render when detected |
 | **Herdr multiplexer** | Sidebar agent cards | Compact per-agent identity/quota/balance summaries |
 
 ## Platform support
@@ -64,13 +65,12 @@ CEN Harness HUD is intentionally extensible, and contributors are welcome to
 add more harness adapters.
 
 **Currently supported:** AGY / Antigravity · Codex CLI · Pi Coding Agent /
-DeepSeek balance · Herdr.
+DeepSeek balance · OpenCode (Herdr-native state card) · Herdr.
 
 **Planned / candidate integrations** (not implemented yet):
 
 - Claude Code
 - dsclaude
-- OpenCode
 - Hermes
 - DSH
 - other coding harnesses/providers where a stable native or structured status
