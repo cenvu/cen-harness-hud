@@ -49,7 +49,9 @@ Every foreign config change follows:
 - Backups are written mode `0600` under `~/.config/cen-harness-hud/backups/`.
 - Foreign customizations abort the install before any mutation (no `--force`).
 - Uninstall restores backups only when the file still matches the recorded
-  post-install hash; user edits are warned about, never clobbered.
+  post-install hash; user edits are warned about, never clobbered. When edits
+  are detected, the install manifest is retired to a private `0600` archive
+  (with the retained backups) rather than left claiming an active install.
 
 ## Privacy at rest
 

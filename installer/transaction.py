@@ -187,6 +187,28 @@ def _apply_action(ctx, act: dict, journal: list,
         atomic_write(path, new_text.encode(), rec["original_mode"])
         return
 
+    if kind == "patch_toml_replace_owned":
+        path = act["path"]
+ # TOCTOU / stale-plan guard: the current PARSED value must still equal
+ # the exact owned value this action was planned against; otherwise the
+ # file changed underneath us — abort rather than overwrite.
+        with open(path, "r") as f:
+            text = f.read()
+        if patching.classify_toml_key(
+                text, tuple(act["table"]), act["key"],
+                act["expected_current_value"]) != "equal":
+            raise ComponentError(
+                "stale plan: owned key %s no longer holds its expected "
+                "value in %s" % (act["key"], path))
+        rec = _backup_once(path, backup_dir, originals, journal)
+        new_text = patching.replace_toml_key(
+            text, tuple(act["table"]), act["key"], act["literal_lines"]
+        )
+ # post-write parse safety BEFORE committing bytes: reject malformed output
+        patching.toml_value(new_text)
+        atomic_write(path, new_text.encode(), rec["original_mode"])
+        return
+
     raise ComponentError(f"unknown action type {kind}")
 
 
@@ -225,6 +247,15 @@ def _verify_action(ctx, act: dict) -> None:
             node = node[t]
         assert node[act["key"]] == act["desired_value"], \
             f"TOML post-mutation verification failed for {act['key']}"
+        return
+    if kind == "patch_toml_replace_owned":
+        with open(act["path"]) as f:
+            parsed = patching.toml_value(f.read())
+        node = parsed
+        for t in act["table"]:
+            node = node[t]
+        assert node[act["key"]] == act["desired_value"], \
+            f"TOML post-migration verification failed for {act['key']}"
         return
     raise ComponentError(f"unknown action type {kind}")
 
@@ -469,14 +500,43 @@ def run_uninstall(ctx: Context, out=print) -> int:
         os.rmdir(ctx.share_root)
 
     if drift:
-        out("UNINSTALL_COMPLETE_WITH_DRIFT — manifest/backups retained "
-            "under ~/.config/cen-harness-hud/")
+ # Retire the manifest: drift evidence must survive, but the ACTIVE
+ # manifest path must no longer falsely claim the product is installed.
+        archive_dir = os.path.join(ctx.state_root, "drift-archive")
+        install_id = man.get("install_id") or "undated"
+        dest_dir = os.path.join(archive_dir, install_id)
+        suffix = 0
+        while os.path.lexists(
+                os.path.join(dest_dir, "install-manifest.json")):
+            suffix += 1
+            dest_dir = os.path.join(archive_dir,
+                                    "%s.%d" % (install_id, suffix))
+        ensure_dir(dest_dir, 0o700)
+        os.replace(ctx.manifest_path,
+                   os.path.join(dest_dir, "install-manifest.json"))
+        os.chmod(os.path.join(dest_dir, "install-manifest.json"), 0o600)
+        os.chmod(dest_dir, 0o700)
+        os.chmod(archive_dir, 0o700)
+        out("UNINSTALL_COMPLETE_WITH_DRIFT — user-edited files preserved; "
+            "drift evidence archived (manifest retired) under "
+            "~/.config/cen-harness-hud/drift-archive/%s/ ; backups retained "
+            "under ~/.config/cen-harness-hud/backups/"
+            % os.path.basename(dest_dir))
         return 0
 
     if os.path.isfile(ctx.manifest_path):
         os.unlink(ctx.manifest_path)
-    if os.path.isdir(ctx.backups_root):
-        shutil.rmtree(ctx.backups_root)
+ # remove ONLY this install's own backups; never touch backup dirs
+ # belonging to prior drift archives (archived manifests reference them)
+    install_id = man.get("install_id")
+    if install_id:
+        current_backup_dir = os.path.join(ctx.backups_root, install_id)
+        if os.path.isdir(current_backup_dir):
+            shutil.rmtree(current_backup_dir)
+            out(f"  removed backups: ~/.config/cen-harness-hud/"
+                f"backups/{install_id}/")
+    if os.path.isdir(ctx.backups_root) and not os.listdir(ctx.backups_root):
+        os.rmdir(ctx.backups_root)
     if os.path.isdir(ctx.state_root) and not os.listdir(ctx.state_root):
         os.rmdir(ctx.state_root)
     out("UNINSTALL_COMPLETE — personal runtime state under "

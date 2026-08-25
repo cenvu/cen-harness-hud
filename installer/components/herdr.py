@@ -26,6 +26,16 @@ AGY_ROWS = [
 CODEX_ROWS = [
     ["workspace", "tab"],
     ["agent", "state_text"],
+    [{"token": "$cen_codex_identity", "bold": True}],
+    [{"token": "$cen_codex_window_1", "bold": True}],
+    [{"token": "$cen_codex_window_2", "bold": True}],
+]
+# EXACT Codex row shape produced by public product v0.1.0. Recognized
+# solely to allow controlled migration of CEN's OWN prior output when no
+# manifest ownership record survives; ANY other value stays foreign.
+CODEX_ROWS_LEGACY_V010 = [
+    ["workspace", "tab"],
+    ["agent", "state_text"],
     [{"token": "$cen_codex_summary", "bold": True}],
 ]
 PI_ROWS = [
@@ -51,7 +61,13 @@ ROWS_LITERAL = {
         '  ["workspace", "tab"],',
         '  ["agent", "state_text"],',
         "  [",
-        '    { token = "$cen_codex_summary", bold = true }',
+        '    { token = "$cen_codex_identity", bold = true }',
+        "  ],",
+        "  [",
+        '    { token = "$cen_codex_window_1", bold = true }',
+        "  ],",
+        "  [",
+        '    { token = "$cen_codex_window_2", bold = true }',
         "  ]",
     ],
     "pi": [
@@ -74,10 +90,18 @@ def render_plugin_manifest(ctx) -> str:
                                  "herdr-plugin.toml.tmpl")
     with open(tmpl_path, "r") as f:
         t = f.read()
-    return (
-        t.replace("{{PYTHON}}", "python3")
+    rendered = (
+        t.replace("{{VERSION}}", ctx.version)
+        .replace("{{PYTHON}}", "python3")
         .replace("{{SCOPED_EVENT}}", ctx.scoped_event_installed)
     )
+    # fail closed: an unresolved placeholder would publish broken metadata
+    for placeholder in ("{{VERSION}}", "{{PYTHON}}", "{{SCOPED_EVENT}}"):
+        if placeholder in rendered:
+            raise ComponentError(
+                "herdr: unresolved template placeholder %s in generated "
+                "plugin manifest" % placeholder)
+    return rendered
 
 
 def _registration(ctx) -> dict:
@@ -224,6 +248,23 @@ def plan(ctx) -> dict:
             any_row_action = True
         elif status == "equal":
             notes.append(f"herdr rows[{key}] already CEN-owned — no-op")
+        elif key == "codex" and patching.classify_toml_key(
+                text, ROWS_TABLE, key, CODEX_ROWS_LEGACY_V010) == "equal":
+            # Exact known CEN v0.1.0 output with no surviving ownership
+            # record → controlled migration to the current shape.
+            notes.append("herdr rows[codex]: exact legacy CEN shape "
+                         "detected — will migrate in place")
+            actions.append({
+                "type": "patch_toml_replace_owned",
+                "path": cfg_path,
+                "table": ROWS_TABLE,
+                "key": key,
+                "expected_current_value": CODEX_ROWS_LEGACY_V010,
+                "literal_lines": ROWS_LITERAL[key],
+                "desired_value": value,
+                "backup_name": "herdr-config.toml",
+            })
+            any_row_action = True
         else:
             raise ConflictError(
                 f"herdr: foreign rows_by_agent.{key} present; refusing to "

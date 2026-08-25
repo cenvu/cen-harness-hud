@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- macOS (arm64 validated for v0.1.0)
+- macOS (arm64 validated)
 - **Python 3 requirements:**
   - `python3` 3.9+ is sufficient for the AGY and Pi components.
   - **`python3` 3.11+ is REQUIRED when installing the Codex or Herdr
@@ -50,8 +50,8 @@ including privacy-at-rest permissions.
 ## Re-running / upgrading
 
 Running the installer again at the same version is a no-op
-(`ALREADY_INSTALLED`). Upgrades from a previous version are not supported in
-v0.1.0: run `cen-hud uninstall` first.
+(`ALREADY_INSTALLED`). Upgrades from a previous installed version are not
+supported: run `cen-hud uninstall` first.
 
 ## Uninstall
 
@@ -63,6 +63,13 @@ Removes exactly what the manifest recorded — restoring patched configs from
 private backups only if you have not edited them since install — and keeps
 your personal runtime state (`~/.config/herdr/cen-harness-hud-quota/`)
 unless you delete it yourself.
+
+If any file was modified since install, it is left untouched (your edits are
+never overwritten). In that case the install manifest is retired to a private
+archive under `~/.config/cen-harness-hud/drift-archive/` together with the
+kept backups, so no active manifest falsely claims the product is still
+installed; reinstalling afterwards proceeds through normal conflict checks
+and will still refuse to overwrite a genuinely conflicting customization.
 
 ## Requirements notes
 

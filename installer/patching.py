@@ -123,6 +123,89 @@ def insert_toml_key(text: str, table: tuple, key: str, literal_lines: list) -> s
     return result
 
 
+def _find_array_block_end(lines: list, start: int) -> int:
+    """Return the index of the line closing the top-level array whose
+    opener is line `start` (`key = [`).
+
+    Bounded bracket-depth scanner, string-aware (basic strings with
+    backslash escapes) and comment-aware (`#` outside strings), so a
+    bracket inside a quoted string can never terminate the block and an
+    INNER closing bracket (nested row array) cannot truncate it. Anything
+    it does not understand raises — callers fail closed rather than
+    rewrite blindly.
+    """
+    depth = 0
+    for j in range(start, len(lines)):
+        in_str = False
+        i = 0
+        line = lines[j]
+        while i < len(line):
+            ch = line[i]
+            if in_str:
+                if ch == "\\":
+                    i += 2
+                    continue
+                if ch == '"':
+                    in_str = False
+            else:
+                if ch == '"':
+                    in_str = True
+                elif ch == "#":
+                    break # comment: ignore rest of line
+                elif ch == "[":
+                    depth += 1
+                elif ch == "]":
+                    depth -= 1
+                    if depth < 0:
+                        raise ValueError(
+                            "unbalanced brackets in owned block")
+                    if depth == 0:
+                        rest = line[i + 1:].strip()
+                        if rest and not rest.startswith("#"):
+                            raise ValueError(
+                                "unexpected trailing content after owned "
+                                "block close")
+                        return j
+            i += 1
+        if in_str:
+            raise ValueError("unterminated string in owned block")
+    raise ValueError("unterminated owned key block")
+
+
+def replace_toml_key(text: str, table: tuple, key: str,
+                     literal_lines: list) -> str:
+    """Replace ONLY an existing `key = [` ... outer-close block inside
+    [table].
+
+    Narrowly scoped to the CEN-owned multiline array-block layout this
+    product itself writes; nested arrays are handled by the bounded depth
+    scanner above so an inner closing bracket can never terminate the
+    replacement early. Anything else (single-line arrays, missing block,
+    unbalanced input) raises — callers must fail closed. The caller must
+    already have verified the current PARSED value; this helper is purely
+    mechanical line replacement and touches no other byte of the file.
+    """
+    lines = text.splitlines()
+    sec_start, sec_end = find_section_span(lines, table)
+    if sec_start is None:
+        raise ValueError("target table not found: " + ".".join(table))
+    opener = "{k} = [".format(k=key)
+    key_start = None
+    for i in range(sec_start, min(sec_end, len(lines))):
+        if lines[i].rstrip() == opener:
+            key_start = i
+            break
+    if key_start is None:
+        raise ValueError("owned key block not found: " + key)
+    key_end = _find_array_block_end(lines, key_start)
+    block = [opener] + list(literal_lines) + ["]"]
+    new_lines = lines[:key_start] + block + lines[key_end + 1:]
+    result = "\n".join(new_lines)
+    if text.endswith("\n"):
+        result += "\n"
+    return result
+
+
 # ── Symlinks ──────────────────────────────────────────────────────────────────
 
 def classify_symlink(link: str, desired_target: str, cen_roots: list) -> str:

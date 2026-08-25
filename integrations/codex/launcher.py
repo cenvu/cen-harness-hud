@@ -151,12 +151,14 @@ def ownership_aware_cleanup(
     exact match, so an older exiting launcher can never clobber a newer
     launcher's registration or summary.
 
-    On match: clears cen_codex_profile (launcher-owned) and sets
-    cen_codex_summary = "quota —" (bridge source), consistent with the
-    publisher's fail-closed UX. The fresh time_ns() sequence is monotonic for
-    each source; because we only act while still owning the registration, no
-    newer session's summary can exist on this pane at that moment (residual
-    TOCTOU window is milliseconds and self-heals on the next event).
+    On match: clears cen_codex_profile (launcher-owned) and fail-closes all
+    bridge-owned Codex display tokens (cen_codex_identity, both window
+    tokens, retired cen_codex_summary), so no account identity or quota
+    from this profile lingers on the pane after exit. The fresh time_ns()
+    sequence is monotonic for each source; because we only act while still
+    owning the registration, no newer session's data can exist on this pane
+    at that moment (residual TOCTOU window is milliseconds and self-heals on
+    the next event).
 
     Returns True if cleanup was performed.
     """
@@ -176,7 +178,12 @@ def ownership_aware_cleanup(
     )
     report_metadata(
         sock_path, pane_id, BRIDGE_SOURCE, time.time_ns(),
-        {"cen_codex_summary": "quota —"},
+        {
+            "cen_codex_identity": "—",
+            "cen_codex_window_1": "—",
+            "cen_codex_window_2": "—",
+            "cen_codex_summary": None,
+        },
     )
     return True
 

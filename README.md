@@ -16,15 +16,15 @@ no resident daemon of its own, no database.
 | Integration | Display surface | Shows |
 |---|---|---|
 | **AGY** (Antigravity CLI) | Native statusline footer + Herdr sidebar card | Account identity/plan, four quota pools (Gemini 5H/W, Claude/GPT 5H/W), reset countdowns |
-| **Codex CLI** | Native TUI status line, one-shot CLI helper, Herdr sidebar card | Model/context rows, 7D/5H remaining percentages |
+| **Codex CLI** | Native TUI status line, one-shot CLI helper, Herdr sidebar card | Model/context rows; structured short/long rate-limit remaining percentages; Herdr card adds identity/plan plus both structured window LEFT % with reset countdown snapshots |
 | **Pi Coding Agent** | Native Pi footer widget | DeepSeek key fingerprint and PAYG balance |
 | **Herdr multiplexer** | Sidebar agent cards | Compact per-agent identity/quota/balance summaries |
 
-## Platform support (v0.1.0)
+## Platform support
 
 - **macOS on Apple Silicon (arm64): validated** on the maintainer's machine.
 - Intel macOS: unvalidated/experimental.
-- Linux, WSL, native Windows: not supported in v0.1.0.
+- Linux, WSL, native Windows: not supported.
 
 ## Design principles
 
@@ -60,11 +60,11 @@ supported platforms, and [PRIVACY.md](PRIVACY.md) for what is stored locally.
 
 ## Roadmap and contributions
 
-v0.1.0 is intentionally extensible, and contributors are welcome to add more
-harness adapters.
+CEN Harness HUD is intentionally extensible, and contributors are welcome to
+add more harness adapters.
 
-**Currently supported (v0.1.0):** AGY / Antigravity · Codex CLI · Pi Coding
-Agent / DeepSeek balance · Herdr.
+**Currently supported:** AGY / Antigravity · Codex CLI · Pi Coding Agent /
+DeepSeek balance · Herdr.
 
 **Planned / candidate integrations** (not implemented yet):
 

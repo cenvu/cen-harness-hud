@@ -38,6 +38,11 @@ CODEX_DESIRED = [
 ]
 
 
+def _repo_version():
+    with open(os.path.join(REPO, "VERSION")) as f:
+        return f.read().strip()
+
+
 def _snapshot():
     snap = {}
     for rel in SENTINELS:
@@ -134,7 +139,8 @@ class InstallTests(Base):
     def test_fresh_all_components(self):
         r = self.install("--agy", "--codex", "--pi", "--herdr")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        root = os.path.join(self.home, ".local/share/cen-harness-hud/0.1.0")
+        root = os.path.join(self.home, ".local/share/cen-harness-hud",
+                            _repo_version())
         for d in ("bin", "installer", "integrations", "templates"):
             self.assertTrue(os.path.isdir(os.path.join(root, d)), d)
         self.assertTrue(os.path.isfile(os.path.join(root, "VERSION")))
@@ -176,8 +182,36 @@ class InstallTests(Base):
         herdr = tomllib.loads(self.read(".config/herdr/config.toml"))
         rows = herdr["ui"]["sidebar"]["agents"]["rows_by_agent"]
         self.assertEqual(len(rows["agy"]), 4)
-        self.assertEqual(len(rows["codex"]), 3)
+        self.assertEqual(len(rows["codex"]), 5)
         self.assertEqual(len(rows["pi"]), 3)
+ # AGY/Pi rows unchanged; Codex card is exactly 5 rows with new tokens
+        self.assertEqual(
+            rows["codex"],
+            [
+                ["workspace", "tab"],
+                ["agent", "state_text"],
+                [{"token": "$cen_codex_identity", "bold": True}],
+                [{"token": "$cen_codex_window_1", "bold": True}],
+                [{"token": "$cen_codex_window_2", "bold": True}],
+            ],
+        )
+        self.assertEqual(
+            rows["agy"],
+            [
+                ["workspace", "tab"],
+                ["agent", "state_text"],
+                [{"token": "$cen_agy_identity", "bold": True}],
+                [{"token": "$cen_agy_quota", "bold": True}],
+            ],
+        )
+        self.assertEqual(
+            rows["pi"],
+            [
+                ["workspace", "tab"],
+                ["agent", "state_text"],
+                [{"token": "$cen_ds_balance", "fg": "#6fb5b7", "bold": True}],
+            ],
+        )
         man = self.assertPrivacy()
         self.assertModes()
         bdir = os.path.join(self.home,
@@ -421,11 +455,21 @@ class TransactionTests(Base):
         r = self.cli("uninstall")
         self.assertEqual(r.returncode, 0)
         self.assertIn("DRIFT", r.stdout)
+ # user edit never clobbered
         edited_file = json.loads(self.read(
             ".gemini/antigravity-cli/settings.json"))
         self.assertEqual(edited_file["statusLine"]["command"],
                          "user-customized")
-        self.assertTrue(os.path.isfile(self.manifest_path()))
+ # manifest RETIRED (not left active, not deleted): evidence archived
+        self.assertFalse(os.path.exists(self.manifest_path()))
+        arch_root = os.path.join(self.home,
+                                 ".config/cen-harness-hud/drift-archive")
+        self.assertTrue(os.path.isdir(arch_root))
+        entries = os.listdir(arch_root)
+        self.assertEqual(len(entries), 1)
+        archived = os.path.join(arch_root, entries[0],
+                                "install-manifest.json")
+        self.assertTrue(os.path.isfile(archived))
 
 
 class DoctorAndPathTests(Base):
@@ -478,7 +522,7 @@ class HardeningTests(Base):
             ".config/herdr/config.toml")
         )["ui"]["sidebar"]["agents"]["rows_by_agent"]
         self.assertEqual(len(rows["agy"]), 4)
-        self.assertEqual(len(rows["codex"]), 3)
+        self.assertEqual(len(rows["codex"]), 5)
         self.assertEqual(len(rows["pi"]), 3)
         man = self.read_manifest()
         herdr_records = [pf for pf in man["patched_files"]
@@ -535,7 +579,8 @@ class HardeningTests(Base):
         self.assertFalse(os.path.exists(self.manifest_path()))
 
     def test_existing_install_root_conflict_zero_mutation(self):
-        share = os.path.join(self.home, ".local/share/cen-harness-hud/0.1.0")
+        share = os.path.join(self.home, ".local/share/cen-harness-hud",
+                             _repo_version())
         os.makedirs(share)
         foreign = os.path.join(share, "foreign.txt")
         with open(foreign, "w") as f:
@@ -608,6 +653,726 @@ class HardeningTests(Base):
         os.chmod(qroot, 0o755)
         assert self.install("--agy").returncode == 0
         self.assertEqual(stat.S_IMODE(os.stat(qroot).st_mode), 0o700)
+
+
+class CodexDisplayTokenTests(unittest.TestCase):
+    """Synthetic-fixture coverage for the dual-window Codex card contract.
+
+    All fixtures are synthetic. No real account values, paths, or quotas.
+    """
+
+    NOW = 1_000_000_000.0
+    IDENTITY = "cen_codex_identity"
+    W1 = "cen_codex_window_1"
+    W2 = "cen_codex_window_2"
+    SUMMARY = "cen_codex_summary"
+
+    @classmethod
+    def setUpClass(cls):
+        cls._codex_dir = os.path.join(REPO, "integrations", "codex")
+        sys.path.insert(0, cls._codex_dir)
+        import unittest.mock # noqa: F401
+        import publisher as pub
+        import launcher as lch
+        cls.pub = pub
+        cls.lch = lch
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._codex_dir in sys.path:
+            sys.path.remove(cls._codex_dir)
+
+    # ── synthetic fixture builders ────────────────────────────────────────
+
+    def acc(self, local="demo", plan="PLUS"):
+        return {"account": {
+            "type": "chatgpt",
+            "email": f"{local}@example.invalid",
+            "planType": plan,
+        }}
+
+    def rl(self, primary=None, secondary=None):
+        snap = {}
+        if primary is not None:
+            snap["primary"] = primary
+        if secondary is not None:
+            snap["secondary"] = secondary
+        return {"rateLimitsByLimitId": {"codex": snap}}
+
+    def dual_rl(self):
+        return self.rl(
+            primary={
+                "usedPercent": 18,
+                "windowDurationMins": 300,
+                "resetsAt": self.NOW + 2 * 3600 + 14 * 60,
+            },
+            secondary={
+                "usedPercent": 39,
+                "windowDurationMins": 10080,
+                "resetsAt": self.NOW + 4 * 86400 + 7 * 3600,
+            },
+        )
+
+    def build(self, acc_res, rl_res):
+        return self.pub.build_display_tokens(
+            acc_res, rl_res, now_epoch=self.NOW)
+
+    # ── cases 1-3: dual windows, LEFT math, countdown truth ──────────────
+
+    def test_dual_windows_percent_and_countdowns(self):
+        tok = self.build(self.acc(), self.dual_rl())
+        self.assertEqual(tok[self.IDENTITY], "demo · PLUS")
+        self.assertEqual(tok[self.W1], "5H 82% · ↻2h14m")
+        self.assertEqual(tok[self.W2], "7D 61% · ↻4d7h")
+
+    def test_left_percent_clamped_bounds(self):
+        rl = self.rl(
+            primary={"usedPercent": 0, "windowDurationMins": 300},
+            secondary={"usedPercent": 150, "windowDurationMins": 10080},
+        )
+        tok = self.build(self.acc(), rl)
+        self.assertEqual(tok[self.W1], "5H 100%")
+        self.assertEqual(tok[self.W2], "7D 0%")
+
+    def test_countdown_reset_in_past_renders_now(self):
+        rl = self.rl(primary={
+            "usedPercent": 50, "windowDurationMins": 300,
+            "resetsAt": self.NOW - 60,
+        })
+        tok = self.build(self.acc(), rl)
+        self.assertEqual(tok[self.W1], "5H 50% · ↻now")
+
+    # ── cases 4-7: degraded window sets ──────────────────────────────────
+
+    def test_primary_only_secondary_slot_fails_closed(self):
+        rl = self.rl(primary={
+            "usedPercent": 18, "windowDurationMins": 300,
+            "resetsAt": self.NOW + 8040,
+        })
+        tok = self.build(self.acc(), rl)
+        self.assertEqual(tok[self.W1], "5H 82% · ↻2h14m")
+        self.assertEqual(tok[self.W2], "—")
+
+    def test_nonfinite_secondary_fails_closed(self):
+        for bad in (float("nan"), float("inf"), "not-a-number"):
+            with self.subTest(bad=bad):
+                rl = self.rl(
+                    primary={"usedPercent": 10, "windowDurationMins": 300},
+                    secondary={"usedPercent": bad,
+                               "windowDurationMins": 10080},
+                )
+                tok = self.build(self.acc(), rl)
+                self.assertEqual(tok[self.W1], "5H 90%")
+                self.assertEqual(tok[self.W2], "—")
+
+    def test_missing_resetsat_quota_without_countdown(self):
+        rl = self.rl(
+            primary={"usedPercent": 18, "windowDurationMins": 300},
+            secondary={"usedPercent": 39, "windowDurationMins": 10080},
+        )
+        tok = self.build(self.acc(), rl)
+        self.assertEqual(tok[self.W1], "5H 82%")
+        self.assertNotIn("↻", tok[self.W1])
+        self.assertEqual(tok[self.W2], "7D 61%")
+        self.assertNotIn("↻", tok[self.W2])
+
+    def test_both_windows_absent_fail_closed(self):
+        for rl_res in (None, {}, {"rateLimitsByLimitId": {}}, self.rl()):
+            with self.subTest(rl=bool(rl_res)):
+                tok = self.build(self.acc(), rl_res)
+                self.assertEqual(tok[self.W1], "—")
+                self.assertEqual(tok[self.W2], "—")
+
+    # ── cases 8-9: identity sanitization + privacy ───────────────────────
+
+    def test_identity_sanitization(self):
+        acc = self.acc(local="de\x1b[31mmo\x07bad", plan="plus ")
+        tok = self.build(acc, None)
+        self.assertEqual(tok[self.IDENTITY], "demobad · PLUS")
+
+    def test_full_email_never_rendered(self):
+        tok = self.build(self.acc(local="someone"), self.dual_rl())
+        for key, value in tok.items():
+            if value is None:
+                continue
+            self.assertNotIn("@", value, key)
+            self.assertNotIn("example.invalid", value, key)
+
+    def test_unusable_account_fails_closed(self):
+        for acc_res in (None, {}, {"account": {}}, {"account": "junk"}):
+            with self.subTest(acc=bool(acc_res)):
+                tok = self.build(acc_res, self.dual_rl())
+                self.assertEqual(tok[self.IDENTITY], "—")
+
+    # ── case 10: two-window → one-window transition clears slot 2 ────────
+
+    def test_switch_to_single_window_clears_second_token(self):
+        two = self.build(self.acc(), self.dual_rl())
+        one = self.build(self.acc(), self.rl(primary={
+            "usedPercent": 18, "windowDurationMins": 300,
+            "resetsAt": self.NOW + 8040,
+        }))
+        expected_keys = {self.IDENTITY, self.W1, self.W2, self.SUMMARY}
+        self.assertTrue(expected_keys.issubset(two))
+        self.assertTrue(expected_keys.issubset(one))
+        self.assertEqual(two[self.W2], "7D 61% · ↻4d7h")
+        self.assertEqual(one[self.W2], "—")
+        self.assertIsNone(one[self.SUMMARY])
+        self.assertIsNone(two[self.SUMMARY])
+
+    # ── case 11: ownership-aware cleanup race protection ─────────────────
+
+    def test_cleanup_skips_newer_registration(self):
+        calls = []
+        with unittest.mock.patch.object(
+                self.lch, "pane_get_tokens",
+                return_value={"cen_codex_profile": "NEWERREG@999"}):
+            with unittest.mock.patch.object(
+                    self.lch, "report_metadata",
+                    side_effect=lambda *a: calls.append(a)):
+                performed = self.lch.ownership_aware_cleanup(
+                    "/tmp/sock-unused", "pane-1", "OLDERREG@123")
+        self.assertFalse(performed)
+        self.assertEqual(calls, [])
+
+    def test_cleanup_failcloses_all_tokens_when_owner_matches(self):
+        recorded = []
+        own = "AAAA1111BBBB@4242"
+        with unittest.mock.patch.object(
+                self.lch, "pane_get_tokens",
+                return_value={"cen_codex_profile": own}):
+            with unittest.mock.patch.object(
+                    self.lch, "report_metadata",
+                    side_effect=lambda *a: recorded.append(a)):
+                performed = self.lch.ownership_aware_cleanup(
+                    "/tmp/sock-unused", "pane-1", own)
+        self.assertTrue(performed)
+        self.assertEqual(len(recorded), 2)
+        profile_call, bridge_call = recorded
+        self.assertEqual(profile_call[2], self.lch.LAUNCHER_SOURCE)
+        self.assertEqual(profile_call[4], {"cen_codex_profile": None})
+        self.assertEqual(bridge_call[2], self.lch.BRIDGE_SOURCE)
+        self.assertEqual(bridge_call[4], {
+            "cen_codex_identity": "—",
+            "cen_codex_window_1": "—",
+            "cen_codex_window_2": "—",
+            "cen_codex_summary": None,
+        })
+
+    def test_cleanup_noop_on_unreadable_pane(self):
+        with unittest.mock.patch.object(
+                self.lch, "pane_get_tokens", return_value=None):
+            with unittest.mock.patch.object(
+                    self.lch, "report_metadata") as rep_mock:
+                performed = self.lch.ownership_aware_cleanup(
+                    "/tmp/sock-unused", "pane-1", "AAAA1111BBBB@4242")
+        self.assertFalse(performed)
+        rep_mock.assert_not_called()
+
+    # ── fail-closed publisher surface ─────────────────────────────────────
+
+    def test_publisher_fail_closed_token_set(self):
+        tok = self.pub.fail_closed_tokens()
+        self.assertEqual(tok[self.IDENTITY], "—")
+        self.assertEqual(tok[self.W1], "—")
+        self.assertEqual(tok[self.W2], "—")
+        self.assertIsNone(tok[self.SUMMARY])
+
+
+class InstallerMigrationTests(Base):
+    """Legacy-shape migration + drift-manifest retirement (synthetic only)."""
+
+    CURRENT_CODEX_VALUE = [
+        ["workspace", "tab"],
+        ["agent", "state_text"],
+        [{"token": "$cen_codex_identity", "bold": True}],
+        [{"token": "$cen_codex_window_1", "bold": True}],
+        [{"token": "$cen_codex_window_2", "bold": True}],
+    ]
+    LEGACY_CODEX_VALUE = [
+        ["workspace", "tab"],
+        ["agent", "state_text"],
+        [{"token": "$cen_codex_summary", "bold": True}],
+    ]
+
+    def _toml_block(self, key, value):
+        def render(v):
+            if isinstance(v, list):
+                inner = ", ".join(render(x) for x in v)
+                return "[" + inner + "]"
+            if isinstance(v, dict):
+                inner = ", ".join(
+                    f"{k} = {render(x)}" for k, x in v.items())
+                return "{ " + inner + " }"
+            if isinstance(v, bool):
+                return "true" if v else "false"
+            return '"%s"' % v
+        lines = [f"{key} = ["] + \
+                ["  " + render(row) + "," for row in value[:-1]] + \
+                ["  " + render(value[-1])] + ["]"]
+        return "\n".join(lines) + "\n"
+
+    def write_herdr_config(self, codex_toml, mode=0o644):
+ # deliberately includes unrelated CEN rows, user settings and comments
+        content = (
+            "# user header comment\n"
+            "[ui.sidebar]\ncustom_note = \"keep me\"\n"
+            "[ui.sidebar.agents]\nrow_gap = 2\n"
+            '[ui.sidebar.agents.rows_by_agent]\n'
+            'agy = [\n  ["workspace", "tab"],\n  ["agent", "state_text"],\n'
+            '  [\n    { token = "$cen_agy_identity", bold = true }\n  ],\n'
+            '  [\n    { token = "$cen_agy_quota", bold = true }\n  ]\n]\n'
+            '# user inline comment\n'
+            + codex_toml +
+            'pi = [\n  ["workspace", "tab"],\n  ["agent", "state_text"],\n'
+            '  [\n    { token = "$cen_ds_balance", fg = "#6fb5b7", '
+            'bold = true }\n  ]\n]\n'
+        )
+        self.write(".config/herdr/config.toml", content, mode)
+        return os.path.join(self.home, ".config/herdr/config.toml")
+
+    def legacy_codex_toml(self):
+ # EXACT textual shape emitted by the public v0.1.0 product's
+ # ROWS_LITERAL["codex"] — nested inner row array on separate lines.
+        return (
+            'codex = [\n'
+            '  ["workspace", "tab"],\n'
+            '  ["agent", "state_text"],\n'
+            '  [\n'
+            '    { token = "$cen_codex_summary", bold = true }\n'
+            '  ]\n'
+            ']\n'
+        )
+
+    def test_exact_legacy_codex_migrates_and_preserves_everything_else(self):
+        cfg_path = self.write_herdr_config(self.legacy_codex_toml(),
+                                           mode=0o640)
+        import hashlib
+        with open(cfg_path, "rb") as f:
+            original_bytes = f.read()
+        r = self.install("--herdr")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        text = self.read(".config/herdr/config.toml")
+        parsed = tomllib.loads(text)
+        rows = parsed["ui"]["sidebar"]["agents"]["rows_by_agent"]
+ # 1. migrated to current shape exactly
+        self.assertEqual(rows["codex"], self.CURRENT_CODEX_VALUE)
+ # canonical legacy token fully gone; no extra bracket residue
+ # (valid TOML proven by tomllib.loads above; exactly one bare "]"
+ # closer per top-level row block: agy, codex, pi)
+        self.assertNotIn("$cen_codex_summary", text)
+        self.assertEqual(
+            sum(1 for ln in text.splitlines() if ln.strip() == "]"), 6)
+ # 2./3./4. unrelated content byte-preserved
+        self.assertEqual(rows["agy"][0], ["workspace", "tab"])
+        self.assertEqual(len(rows["agy"]), 4)
+        self.assertEqual(rows["pi"], [
+            ["workspace", "tab"],
+            ["agent", "state_text"],
+            [{"token": "$cen_ds_balance",
+              "fg": "#6fb5b7", "bold": True}],
+        ])
+        self.assertEqual(parsed["ui"]["sidebar"]["agents"]["row_gap"], 2)
+        self.assertEqual(parsed["ui"]["sidebar"]["custom_note"], "keep me")
+        self.assertIn("# user header comment", text)
+        self.assertIn("# user inline comment", text)
+ # original file mode preserved
+        self.assertEqual(stat.S_IMODE(os.stat(
+            os.path.join(self.home,
+                         ".config/herdr/config.toml")).st_mode), 0o640)
+ # 7. ONE truthful backup record
+        man = self.read_manifest()
+        recs = [pf for pf in man["patched_files"]
+                if pf["path"].endswith("herdr/config.toml")]
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["before_sha256"],
+                         hashlib.sha256(original_bytes).hexdigest())
+        with open(cfg_path, "rb") as f:
+            self.assertEqual(recs[0]["after_sha256"],
+                             hashlib.sha256(f.read()).hexdigest())
+        backup_abs = os.path.join(
+            self.home, ".config/cen-harness-hud/backups",
+            man["install_id"], os.path.basename(recs[0]["backup"]))
+        self.assertTrue(os.path.isfile(backup_abs))
+        self.assertEqual(stat.S_IMODE(os.stat(backup_abs).st_mode), 0o600)
+        with open(backup_abs, "rb") as f:
+            self.assertEqual(f.read(), original_bytes)
+
+    def test_near_match_legacy_conflicts(self):
+        near = self._toml_block("codex", [
+            ["workspace", "tab"],
+            ["agent", "state_text"],
+            [{"token": "$cen_codex_summary", "bold": False}],
+        ])
+        self.write_herdr_config(near)
+        r = self.install("--herdr")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("CONFLICT", r.stdout)
+        self.assertIn("$cen_codex_summary", self.read(
+            ".config/herdr/config.toml"))
+
+    def test_user_custom_codex_conflicts(self):
+        custom = self._toml_block("codex", [["my", "custom", "rows"]])
+        self.write_herdr_config(custom)
+        r = self.install("--herdr")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("CONFLICT", r.stdout)
+        self.assertEqual(
+            tomllib.loads(self.read(
+                ".config/herdr/config.toml")
+            )["ui"]["sidebar"]["agents"]["rows_by_agent"]["codex"],
+            [["my", "custom", "rows"]])
+
+    def test_migration_failure_rolls_back_to_legacy_bytes_and_mode(self):
+        self.write_herdr_config(self.legacy_codex_toml(), mode=0o640)
+        import unittest.mock
+        from installer import transaction as txn
+        from installer.paths import Context
+
+        fake_ctx = Context(home=self.home, source_root=REPO)
+        with unittest.mock.patch.object(
+                txn, "_verify_action",
+                side_effect=ComponentError("induced")):
+            rc = txn.run_install(fake_ctx, [("herdr", True)],
+                                 out=lambda *_: None)
+        self.assertEqual(rc, 1)
+        p = os.path.join(self.home, ".config/herdr/config.toml")
+        self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o640)
+        parsed = tomllib.loads(open(p).read())
+        self.assertEqual(
+            parsed["ui"]["sidebar"]["agents"]["rows_by_agent"]["codex"],
+            self.LEGACY_CODEX_VALUE)
+        self.assertFalse(os.path.exists(self.manifest_path()))
+
+    def test_current_shape_is_noop(self):
+        self.write_herdr_config(self._toml_block(
+            "codex", self.CURRENT_CODEX_VALUE))
+        r = self.install("--herdr")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("rows[codex] already CEN-owned", r.stdout)
+        self.assertEqual(
+            tomllib.loads(self.read(
+                ".config/herdr/config.toml")
+            )["ui"]["sidebar"]["agents"]["rows_by_agent"]["codex"],
+            self.CURRENT_CODEX_VALUE)
+
+    def test_absent_codex_inserts_normally(self):
+        content = ('[ui.sidebar.agents]\nrow_gap = 4\n'
+                   '[ui.sidebar.agents.rows_by_agent]\n')
+        self.write(".config/herdr/config.toml", content)
+        r = self.install("--herdr")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        parsed = tomllib.loads(self.read(".config/herdr/config.toml"))
+        rows = parsed["ui"]["sidebar"]["agents"]["rows_by_agent"]
+        self.assertEqual(rows["codex"], self.CURRENT_CODEX_VALUE)
+        self.assertEqual(parsed["ui"]["sidebar"]["agents"]["row_gap"], 4)
+
+
+class DriftRetirementTests(Base):
+    """Uninstall-with-drift retires the active manifest (synthetic only)."""
+
+    def _setup_with_drift(self):
+        self.write(".gemini/antigravity-cli/settings.json",
+                   '{"theme": "dark"}')
+        assert self.install("--agy").returncode == 0
+ # personal runtime quota state marker must survive everything
+        qroot = os.path.join(
+            self.home, ".config/herdr/cen-harness-hud-quota/profiles")
+        os.makedirs(qroot, exist_ok=True)
+        with open(os.path.join(qroot, "marker.json"), "w") as f:
+            f.write("{}\n")
+ # benign user edit (does NOT conflict with CEN ownership)
+        p = os.path.join(self.home, ".gemini/antigravity-cli/settings.json")
+        edited = json.loads(open(p).read())
+        edited["theme"] = "ocean"
+        open(p, "w").write(json.dumps(edited))
+        return p
+
+    def test_drift_uninstall_retires_manifest_keeps_evidence(self):
+        drifted_path = self._setup_with_drift()
+        r = self.cli("uninstall")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("UNINSTALL_COMPLETE_WITH_DRIFT", r.stdout)
+        self.assertIn("drift-archive", r.stdout)
+ # drifted user file untouched (edit preserved, CEN keys intact)
+        after = json.loads(open(drifted_path).read())
+        self.assertEqual(after["theme"], "ocean")
+        self.assertIn("status.py", after["statusLine"]["command"])
+ # ACTIVE manifest gone
+        self.assertFalse(os.path.exists(self.manifest_path()))
+ # archived manifest retained, private modes
+        arch_root = os.path.join(self.home,
+                                 ".config/cen-harness-hud/drift-archive")
+        self.assertTrue(os.path.isdir(arch_root))
+        self.assertEqual(stat.S_IMODE(os.stat(arch_root).st_mode), 0o700)
+        entries = os.listdir(arch_root)
+        self.assertEqual(len(entries), 1)
+        dest_dir = os.path.join(arch_root, entries[0])
+        self.assertEqual(stat.S_IMODE(os.stat(dest_dir).st_mode), 0o700)
+        archived = os.path.join(dest_dir, "install-manifest.json")
+        self.assertTrue(os.path.isfile(archived))
+        self.assertEqual(stat.S_IMODE(os.stat(archived).st_mode), 0o600)
+        self.assertEqual(json.load(open(archived))["schema_version"], 1)
+ # backups retained
+        self.assertTrue(os.path.isdir(os.path.join(
+            self.home, ".config/cen-harness-hud/backups")))
+ # personal runtime quota state untouched
+        self.assertTrue(os.path.isfile(os.path.join(
+            self.home,
+            ".config/herdr/cen-harness-hud-quota/profiles",
+            "marker.json")))
+
+    def test_reinstall_after_drift_retirement_proceeds_when_no_conflict(self):
+        self._setup_with_drift()
+        assert self.cli("uninstall").returncode == 0
+        r = self.install("--agy")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("INSTALLED", r.stdout)
+ # benign user edit survived the whole cycle
+        edited = json.loads(self.read(
+            ".gemini/antigravity-cli/settings.json"))
+        self.assertEqual(edited["theme"], "ocean")
+        self.assertIn("status.py", edited["statusLine"]["command"])
+
+    def test_reinstall_after_drift_still_conflicts_on_real_conflict(self):
+        self.write(".gemini/antigravity-cli/settings.json",
+                   '{"theme": "dark"}')
+        assert self.install("--agy").returncode == 0
+        p = os.path.join(self.home, ".gemini/antigravity-cli/settings.json")
+        edited = json.loads(open(p).read())
+        edited["statusLine"]["command"] = "user-customized"
+        open(p, "w").write(json.dumps(edited))
+        assert self.cli("uninstall").returncode == 0
+        self.assertFalse(os.path.exists(self.manifest_path()))
+        r = self.install("--agy")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("CONFLICT", r.stdout)
+        self.assertEqual(json.loads(open(p).read())["statusLine"]["command"],
+                         "user-customized")
+
+    def test_clean_uninstall_semantics_unchanged(self):
+        self.write(".gemini/antigravity-cli/settings.json",
+                   '{"keep": true}')
+        assert self.install("--agy").returncode == 0
+        r = self.cli("uninstall")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("UNINSTALL_COMPLETE", r.stdout)
+        self.assertNotIn("WITH_DRIFT", r.stdout)
+        self.assertFalse(os.path.exists(self.manifest_path()))
+        self.assertFalse(os.path.isdir(os.path.join(
+            self.home, ".config/cen-harness-hud/backups")))
+
+    def test_fake_version_transition_remains_uninstall_first(self):
+ # old-manifest version differs from installer's conceptual version →
+ # direct upgrade stays unsupported; after retirement-style removal of
+ # the stale manifest, normal planning proceeds.
+        self.write(".gemini/antigravity-cli/settings.json",
+                   '{"theme": "dark"}')
+        assert self.install("--agy").returncode == 0
+        installed = self.read_manifest()["hud_version"]
+        man = self.read_manifest()
+        man["hud_version"] = "9.9.9"
+        with open(self.manifest_path(), "w") as f:
+            json.dump(man, f)
+        r = self.install("--agy")
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("UPGRADE_UNSUPPORTED", r.stdout)
+ # simulate the documented uninstall-first lifecycle completing
+        man["hud_version"] = installed
+        with open(self.manifest_path(), "w") as f:
+            json.dump(man, f)
+        assert self.cli("uninstall").returncode == 0
+        self.assertFalse(os.path.exists(self.manifest_path()))
+        r = self.install("--agy")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+class DriftEvidenceLifetimeTests(Base):
+    """Archived drift evidence must survive later clean uninstalls."""
+
+    def _quota_marker(self):
+        qroot = os.path.join(
+            self.home, ".config/herdr/cen-harness-hud-quota/profiles")
+        os.makedirs(qroot, exist_ok=True)
+        marker = os.path.join(qroot, "marker.json")
+        with open(marker, "w") as f:
+            f.write("{}\n")
+        return marker
+
+    def _drift_cycle(self):
+        self.write(".gemini/antigravity-cli/settings.json",
+                   '{"theme": "dark"}')
+        assert self.install("--agy").returncode == 0
+        p = os.path.join(self.home, ".gemini/antigravity-cli/settings.json")
+        edited = json.loads(open(p).read())
+        edited["theme"] = "ocean-%d" % len(os.listdir(os.path.join(
+            self.home, ".config/cen-harness-hud/drift-archive"))) \
+            if os.path.isdir(os.path.join(
+                self.home,
+                ".config/cen-harness-hud/drift-archive")) else "ocean"
+        open(p, "w").write(json.dumps(edited))
+        assert self.cli("uninstall").returncode == 0
+
+    def test_archive_and_backups_survive_later_clean_uninstall(self):
+        marker = self._quota_marker()
+        self._drift_cycle()
+        arch_root = os.path.join(self.home,
+                                 ".config/cen-harness-hud/drift-archive")
+        archives = os.listdir(arch_root)
+        self.assertEqual(len(archives), 1)
+        archived_manifest = os.path.join(arch_root, archives[0],
+                                         "install-manifest.json")
+        man_a = json.load(open(archived_manifest))
+ # reinstall B → clean uninstall B
+        self.write(".gemini/antigravity-cli/settings.json",
+                   '{"theme": "dark"}')
+        assert self.install("--agy").returncode == 0
+        install_id_b = self.read_manifest()["install_id"]
+        assert self.cli("uninstall").returncode == 0
+ # archived manifest A STILL exists
+        self.assertTrue(os.path.isfile(archived_manifest))
+ # backup A STILL exists and manifest references resolve
+        for pf in man_a["patched_files"]:
+            ref = os.path.join(self.home,
+                               pf["backup"].replace("~/", ""))
+            self.assertTrue(os.path.isfile(ref), pf["backup"])
+            self.assertEqual(stat.S_IMODE(os.stat(ref).st_mode), 0o600)
+ # current B backup dir removed; backups_root remains (holds backup A)
+        self.assertFalse(os.path.isdir(os.path.join(
+            self.home, ".config/cen-harness-hud/backups", install_id_b)))
+        self.assertTrue(os.path.isdir(os.path.join(
+            self.home, ".config/cen-harness-hud/backups")))
+ # archive modes remain private
+        self.assertEqual(stat.S_IMODE(os.stat(arch_root).st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(os.stat(
+            os.path.dirname(archived_manifest)).st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(os.stat(archived_manifest).st_mode),
+                         0o600)
+ # no active manifest; personal runtime state untouched
+        self.assertFalse(os.path.exists(self.manifest_path()))
+        self.assertTrue(os.path.isfile(marker))
+
+    def test_clean_uninstall_without_history_unchanged(self):
+        marker = self._quota_marker()
+        self.write(".gemini/antigravity-cli/settings.json",
+                   '{"keep": true}')
+        assert self.install("--agy").returncode == 0
+        r = self.cli("uninstall")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("UNINSTALL_COMPLETE", r.stdout)
+        self.assertNotIn("WITH_DRIFT", r.stdout)
+        self.assertFalse(os.path.exists(self.manifest_path()))
+        self.assertFalse(os.path.isdir(os.path.join(
+            self.home, ".config/cen-harness-hud/backups")))
+        self.assertFalse(os.path.exists(
+            os.path.join(self.home,
+                         ".local/share/cen-harness-hud")))
+        self.assertTrue(os.path.isfile(marker))
+
+    def test_multiple_drift_archives_all_survive_final_clean_uninstall(self):
+        self._quota_marker()
+        self._drift_cycle() # archive 1
+        self._drift_cycle() # archive 2
+        arch_root = os.path.join(self.home,
+                                 ".config/cen-harness-hud/drift-archive")
+        self.assertEqual(len(os.listdir(arch_root)), 2)
+        archives = sorted(os.listdir(arch_root))
+        refs = []
+        for a in archives:
+            m = json.load(open(os.path.join(
+                arch_root, a, "install-manifest.json")))
+            refs.extend(pf["backup"] for pf in m["patched_files"])
+        # final clean uninstall of a third cycle
+        self.write(".gemini/antigravity-cli/settings.json",
+                   '{"theme": "dark"}')
+        assert self.install("--agy").returncode == 0
+        install_id_c = self.read_manifest()["install_id"]
+        assert self.cli("uninstall").returncode == 0
+ # both historical archives + their backups survive
+        self.assertEqual(sorted(os.listdir(arch_root)), archives)
+        for ref in refs:
+            self.assertTrue(os.path.isfile(os.path.join(
+                self.home, ref.replace("~/", ""))), ref)
+ # only C's own backup dir was removed
+        self.assertFalse(os.path.isdir(os.path.join(
+            self.home, ".config/cen-harness-hud/backups", install_id_c)))
+        self.assertTrue(os.path.isdir(os.path.join(
+            self.home, ".config/cen-harness-hud/backups")))
+
+
+class VersionWiringTests(Base):
+    """VERSION file is the single product-version truth across surfaces."""
+
+    def _surfaces(self, expect_version):
+        root = os.path.join(self.home, ".local/share/cen-harness-hud",
+                            expect_version)
+        with open(os.path.join(root, "VERSION")) as f:
+            file_v = f.read().strip()
+        man = self.read_manifest()
+        plugins = json.loads(self.read(".config/herdr/plugins.json"))
+        reg = [e for e in plugins if isinstance(e, dict)
+               and e.get("plugin_id") == "cen-harness-hud-quota"]
+        import tomllib as tl
+        gen = tl.load(open(os.path.join(root, "herdr-plugin.toml"), "rb"))
+        return {
+            "file": file_v,
+            "manifest": man["hud_version"],
+            "registry": reg[0]["version"] if reg else None,
+            "generated_plugin": gen["version"],
+            "generated_manifest_path": os.path.join(root,
+                                                    "herdr-plugin.toml"),
+        }
+
+    def assert_consistent(self, version):
+        s = self._surfaces(version)
+        for key in ("file", "manifest", "registry", "generated_plugin"):
+            self.assertEqual(s[key], version, key)
+ # no unresolved placeholders leaked into the rendered manifest
+        with open(s["generated_manifest_path"]) as f:
+            text = f.read()
+        for placeholder in ("{{VERSION}}", "{{PYTHON}}",
+                            "{{SCOPED_EVENT}}"):
+            self.assertNotIn(placeholder, text)
+
+    def test_current_version_all_surfaces_agree(self):
+        with open(os.path.join(REPO, "VERSION")) as f:
+            current = f.read().strip()
+        r = self.install("--herdr")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assert_consistent(current)
+
+    def test_synthetic_bump_wires_every_surface(self):
+ # disposable source copy whose VERSION is bumped — repo VERSION untouched
+        with open(os.path.join(REPO, "VERSION")) as f:
+            canonical = f.read().strip()
+        bumped = "9.8.7"
+        src = tempfile.mkdtemp(prefix="cen-hud-src-")
+        try:
+            for item in ("bin", "installer", "integrations", "templates",
+                         "VERSION"):
+                s = os.path.join(REPO, item)
+                d = os.path.join(src, item)
+                if os.path.isdir(s):
+                    shutil.copytree(s, d, ignore=shutil.ignore_patterns(
+                        "__pycache__", "*.pyc"))
+                else:
+                    shutil.copy2(s, d)
+            with open(os.path.join(src, "VERSION"), "w") as f:
+                f.write(bumped + "\n")
+            env = dict(os.environ)
+            env["HOME"] = self.home
+            env["PATH"] = MIN_PATH
+            r = subprocess.run(
+                [sys.executable, CLI, "install", "--source-root", src,
+                 "--herdr"],
+                env=env, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assert_consistent(bumped)
+        finally:
+            shutil.rmtree(src, ignore_errors=True)
+ # canonical repo VERSION must remain untouched by this test
+        with open(os.path.join(REPO, "VERSION")) as f:
+            self.assertEqual(f.read().strip(), canonical)
 
 
 if __name__ == "__main__":

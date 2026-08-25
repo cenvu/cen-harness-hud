@@ -3,7 +3,7 @@
 
 Canonical Source: cen-harness-hud/integrations/codex/publisher.py
 
-Publishes profile-correct Codex quota summary to EXACTLY ONE Herdr pane:
+Publishes profile-correct Codex display tokens to EXACTLY ONE Herdr pane:
 the pane that triggered the current event.
 
 Flow:
@@ -13,10 +13,21 @@ Flow:
   4. Validate TAG@PID registration and profile mapping
   5. Query codex app-server with explicit CODEX_HOME
   6. Revalidate registration before publishing
-  7. Publish cen_codex_summary to event pane ONLY
+  7. Publish display tokens to event pane ONLY
+
+Token contract (all sanitized + bounded):
+  cen_codex_identity   <local-part> · <PLAN>
+  cen_codex_window_1   <duration> <LEFT%> · ↻<countdown>   (primary)
+  cen_codex_window_2   <duration> <LEFT%> · ↻<countdown>   (secondary)
+  cen_codex_summary    cleared (retired token; no stale residue)
+
+Windows are published in deterministic normal order: primary, secondary.
+Each window is independently finite-checked. Missing resetsAt → quota
+percentage without countdown. No valid windows → "—" fail-closed.
 
 Ownership:
-  Source 'cen-codex-bridge' owns ONLY: cen_codex_summary
+  Source 'cen-codex-bridge' owns ONLY: cen_codex_identity,
+    cen_codex_window_1, cen_codex_window_2, cen_codex_summary
   Source 'cen-codex-launcher' owns ONLY: cen_codex_profile
   Bridge MUST NOT clear or modify cen_codex_profile
 
@@ -54,6 +65,11 @@ PROFILES_DIR = os.path.expanduser(
 )
 TAG_PATTERN = re.compile(r"^[0-9A-F]{12}$")
 PID_PATTERN = re.compile(r"^[0-9]+$")
+
+IDENTITY_TOKEN = "cen_codex_identity"
+WINDOW_TOKENS = ("cen_codex_window_1", "cen_codex_window_2")
+RETIRED_SUMMARY_TOKEN = "cen_codex_summary"
+EMPTY_STATE = "—"
 
 
 # ── Profile Validation ────────────────────────────────────────────────────────
@@ -123,91 +139,149 @@ def load_and_validate_mapping(tag: str) -> Optional[str]:
     return canonical
 
 
-# ── Quota Formatting ──────────────────────────────────────────────────────────
+# ── Display Token Formatting ──────────────────────────────────────────────────
 
-def format_compact_summary(acc_res: Any, rl_res: Any) -> str:
-    """Format a compact Herdr sidebar summary from account/read and rateLimits/read.
+def format_identity_token(acc_res: Any) -> str:
+    """Format the identity token: <sanitized local-part> · <PLAN>.
 
-    UI contract: identity · plan · <duration> <LEFT%>.
-    No reset countdowns, no reset-credit count, no context details
-    (those remain in cen-codex-status detailed output).
-
-    Example: user.primary · PLUS · 7D 0%
+    Never renders a full email, account id, CODEX_HOME, or credential
+    material — only the local-part of the email plus the plan label.
     """
- # Import formatting helpers from status.py (safe: guarded by __name__ check)
-    from status import (
-        format_duration,
-        normalize_quota_window,
-        sanitize_label,
-    )
+    from status import sanitize_label
+
+    if not acc_res or not isinstance(acc_res, dict):
+        return EMPTY_STATE
+    acc = acc_res.get("account")
+    if not isinstance(acc, dict):
+        return EMPTY_STATE
 
     parts = []
-
- # 1. Identity: prefer local-part over full email
-    if acc_res and isinstance(acc_res, dict):
-        acc = acc_res.get("account", {})
-        if isinstance(acc, dict):
-            email = acc.get("email")
-            if email and isinstance(email, str):
-                email_str = email.strip()
-                local_part = email_str.split("@")[0] if "@" in email_str else email_str
+    email = acc.get("email")
+    if isinstance(email, str) and email.strip():
+        email_str = email.strip()
+        if "@" in email_str:
+            local_part = email_str.split("@", 1)[0]
+            if local_part:
                 parts.append(sanitize_label(local_part, max_len=20))
-            plan = acc.get("planType")
-            if plan and isinstance(plan, str):
-                parts.append(sanitize_label(plan.strip().upper(), max_len=10))
+    plan = acc.get("planType")
+    if isinstance(plan, str) and plan.strip():
+        parts.append(sanitize_label(plan.strip().upper(), max_len=10))
 
- # 2. Rate limits
+    if not parts:
+        return EMPTY_STATE
+    return " · ".join(parts)
+
+
+def format_window_token(window: Any, now_epoch: Optional[float] = None) -> Optional[str]:
+    """Format one quota window token: <duration> <LEFT%> · ↻<countdown>.
+
+    - LEFT = clamp(100 - usedPercent, 0..100), finite-checked
+    - duration derived structurally from windowDurationMins (never hardcoded)
+    - countdown derived only from resetsAt; absent/invalid → no countdown
+    Returns None when the window itself is absent/invalid (fail-closed).
+    """
+    from status import format_countdown, format_duration
+
+    if not isinstance(window, dict):
+        return None
+    used = window.get("usedPercent")
+    if used is None:
+        return None
+    try:
+        used_f = float(used)
+        if not math.isfinite(used_f):
+            return None
+    except (ValueError, TypeError):
+        return None
+
+    rem = max(0.0, min(100.0, 100.0 - used_f))
+    dur = format_duration(window.get("windowDurationMins")) or "QUOTA"
+    text = f"{dur} {int(round(rem))}%"
+    countdown = format_countdown(window.get("resetsAt"), now_epoch)
+    if countdown:
+        text = f"{text} · {countdown}"
+    return text
+
+
+def collect_windows(rl_res: Any) -> list:
+    """Collect quota windows in deterministic normal order: primary, secondary.
+
+    Windows are NOT labeled by assumption — duration labels come strictly
+    from each window's structured windowDurationMins.
+    """
+    windows = []
     if rl_res and isinstance(rl_res, dict):
+        entries = []
         limits_dict = rl_res.get("rateLimitsByLimitId")
-        limits_list = []
         if limits_dict and isinstance(limits_dict, dict):
-            for dk, snap in limits_dict.items():
+            for _, snap in limits_dict.items():
                 if isinstance(snap, dict):
-                    eff_id = snap.get("limitId") or str(dk)
-                    snap_copy = dict(snap)
-                    snap_copy["limitId"] = sanitize_label(eff_id)
-                    limits_list.append(snap_copy)
+                    entries.append(snap)
         else:
             fallback = rl_res.get("rateLimits")
             if fallback and isinstance(fallback, dict):
-                limits_list = [fallback]
+                entries.append(fallback)
 
-        has_multi = len(limits_list) > 1
+        for entry in entries:
+            for key in ("primary", "secondary"):
+                win = entry.get(key)
+                if isinstance(win, dict):
+                    windows.append(win)
+    return windows
 
-        for entry in limits_list:
-            limit_id = sanitize_label(entry.get("limitId", ""))
-            p_win = entry.get("primary")
-            if p_win and isinstance(p_win, dict):
-                used = p_win.get("usedPercent")
-                if used is not None:
-                    try:
-                        used_f = float(used)
-                        if math.isfinite(used_f):
-                            rem = max(0.0, min(100.0, 100.0 - used_f))
-                            dur = format_duration(p_win.get("windowDurationMins"))
-                            segment = f"{dur} {int(round(rem))}%"
-                            if has_multi and limit_id and limit_id != "codex":
-                                segment = f"[{limit_id}] {segment}"
-                            parts.append(segment)
-                    except (ValueError, TypeError):
-                        pass
 
-    if not parts:
-        return "quota —"
+def build_display_tokens(
+    acc_res: Any,
+    rl_res: Any,
+    now_epoch: Optional[float] = None,
+) -> Dict[str, Optional[str]]:
+    """Build the bounded Herdr display token set (sanitized, fail-closed).
 
-    return " · ".join(parts)
+    - identity: sanitized <local-part> · <PLAN>, else "—"
+    - window_1 / window_2: first two valid windows in normal order;
+      invalid/absent slots render as "—"
+    - retired summary token is explicitly cleared so an older card layout
+      can never keep showing stale combined data
+    """
+    tokens: Dict[str, Optional[str]] = {
+        IDENTITY_TOKEN: format_identity_token(acc_res),
+        RETIRED_SUMMARY_TOKEN: None,
+    }
+
+    valid = []
+    for win in collect_windows(rl_res):
+        rendered = format_window_token(win, now_epoch)
+        if rendered is not None:
+            valid.append(rendered)
+        if len(valid) == len(WINDOW_TOKENS):
+            break
+
+    for i, tok in enumerate(WINDOW_TOKENS):
+        tokens[tok] = valid[i] if i < len(valid) else EMPTY_STATE
+    return tokens
 
 
 # ── Main Publisher Logic ──────────────────────────────────────────────────────
 
+def fail_closed_tokens() -> Dict[str, Optional[str]]:
+    """Bounded empty state: identity + both windows "—", retired token cleared."""
+    tokens: Dict[str, Optional[str]] = {
+        IDENTITY_TOKEN: EMPTY_STATE,
+        RETIRED_SUMMARY_TOKEN: None,
+    }
+    for tok in WINDOW_TOKENS:
+        tokens[tok] = EMPTY_STATE
+    return tokens
+
+
 def publish_fail_closed(sock_path: str, pane_id: str, event_seq: int) -> None:
-    """Publish fail-closed state: quota — to the event pane."""
+    """Publish fail-closed display tokens to the event pane."""
     report_metadata(
         sock_path,
         pane_id,
         BRIDGE_SOURCE,
         event_seq,
-        {"cen_codex_summary": "quota —"},
+        fail_closed_tokens(),
     )
 
 
@@ -289,13 +363,13 @@ def main() -> None:
         publish_fail_closed(sock_path, pane_id, event_seq)
         sys.exit(0)
 
-    summary = format_compact_summary(acc_res, rl_res)
+    tokens = build_display_tokens(acc_res, rl_res)
     report_metadata(
         sock_path,
         pane_id,
         BRIDGE_SOURCE,
         event_seq,
-        {"cen_codex_summary": summary},
+        tokens,
     )
 
 
