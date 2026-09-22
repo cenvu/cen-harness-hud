@@ -16,7 +16,14 @@ client — full disclosure below.
 | Integration | Stored | Where |
 |---|---|---|
 | AGY | sanitized account local-part (truncated), plan tier, quota percentages | `~/.config/herdr/cen-harness-hud-quota/agy/*.json` (`0700` dir, `0600` files) |
-| Codex | a filesystem mapping between a hashed profile tag and its CODEX_HOME path — no account identity | `~/.config/herdr/cen-harness-hud-quota/profiles/` (`0700` dir, `0600` files) |
+| Codex profiles | one-way short profile tag mapped to its CODEX_HOME filesystem path | `~/.config/herdr/cen-harness-hud-quota/profiles/` (`0700` dir, `0600` files) |
+| Codex sessions | CODEX_HOME path plus schema/timing metadata, filename is a SHA-256-derived key from the native Codex session id (the raw session id is not used as the filename) | `~/.config/herdr/cen-harness-hud-quota/codex-sessions/` (`0700` dir, `0600` files) |
+| Codex snapshots | sanitized account local-part alias, plan tier, normalized quota remaining data, window duration, reset timestamp, fetched/attempt timing, stale flag — hash-keyed by session id | `~/.config/herdr/cen-harness-hud-quota/codex-snapshots/` (`0700` dir, `0600` files) |
+
+No full email address, no OAuth token, no API key, and no `auth.json`
+content is stored in any of the above. Quota snapshot metadata IS persisted
+locally as described; only money balances (PAYG cash amounts) are never
+stored.
 
 Only this persistent AGY/Codex state uses those disk permissions. The Pi
 balance integration persists nothing (see below).
@@ -41,7 +48,7 @@ The optional Pi balance integration:
 
 - passwords, API keys, OAuth/JWT tokens, cookies
 - full email addresses
-- balances for AGY/Codex (subscription-based)
+- money balances (PAYG cash amounts)
 
 ## Removal
 

@@ -25,6 +25,16 @@ The code is POSIX-oriented, but no claims are made until tested.
 - Herdr may need a configuration reload or restart after (re)installing
   before new sidebar/plugin configuration is visible.
 
+## Codex telemetry behavior
+
+- The Herdr weekly countdown is snapshot/event refreshed, not a live ticker.
+- Working activity may refresh quota approximately every 60 seconds; idle
+  sessions do not quota-poll.
+- The native Codex footer does not show a reset countdown through the
+  current built-in status-line items.
+- Short-window (5H) quota remains native-footer-only by design and is not
+  duplicated in the compact Herdr card.
+
 ## OpenCode support
 
 OpenCode support is STATE-ONLY through Herdr's native detection and requires

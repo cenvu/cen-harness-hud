@@ -27,6 +27,23 @@ CEN HUD does not install or authenticate OpenCode. The card shows only the
 lifecycle state that Herdr itself detects — CEN HUD publishes no OpenCode
 metadata of its own.
 
+## Codex notes
+
+Installing the Codex component may:
+
+1. patch `[tui].status_line` in `~/.codex/config.toml` to the CEN-owned
+   native footer shape (model/reasoning, status, context, short-window and
+   weekly remaining values)
+2. enable `[features].hooks = true` when absent
+3. add ONE CEN SessionStart command hook to `~/.codex/hooks.json`
+4. preserve your unrelated existing hooks
+5. fail closed (CONFLICT) if the owned config surface is foreign/custom
+
+CEN HUD does not install or authenticate Codex. `cen-codex` remains
+available as a profile-aware launcher, but telemetry does NOT require it
+for normal generic Codex sessions when native session ownership can be
+proven.
+
 ## Install
 
 ```sh

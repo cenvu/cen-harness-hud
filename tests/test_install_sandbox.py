@@ -15,6 +15,7 @@ import sys
 import tempfile
 import tomllib
 import unittest
+import unittest.mock
 from installer.paths import ComponentError
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -32,6 +33,7 @@ SENTINELS = [
 
 CODEX_DESIRED = [
     "model-with-reasoning",
+    "status",
     "context-remaining",
     "five-hour-limit",
     "weekly-limit",
@@ -160,7 +162,8 @@ class InstallTests(Base):
                 os.path.realpath(root)))
  # regression: directly-exec'd integration entrypoints keep +x
         for rel in ("integrations/codex/launcher.py",
-                    "integrations/codex/status.py"):
+                    "integrations/codex/status.py",
+                    "integrations/codex/session_hook.py"):
             installed = os.path.join(root, rel)
             self.assertTrue(os.access(installed, os.X_OK), rel)
             with open(installed, "rb") as f:
@@ -182,18 +185,17 @@ class InstallTests(Base):
         herdr = tomllib.loads(self.read(".config/herdr/config.toml"))
         rows = herdr["ui"]["sidebar"]["agents"]["rows_by_agent"]
         self.assertEqual(len(rows["agy"]), 4)
-        self.assertEqual(len(rows["codex"]), 5)
+        self.assertEqual(len(rows["codex"]), 4)
         self.assertEqual(len(rows["pi"]), 3)
         self.assertEqual(len(rows["opencode"]), 2)
- # AGY/Pi rows unchanged; Codex card is exactly 5 rows with new tokens
+ # AGY/Pi rows unchanged; Codex card is compact weekly-only
         self.assertEqual(
             rows["codex"],
             [
                 ["workspace", "tab"],
                 ["agent", "state_text"],
                 [{"token": "$cen_codex_identity", "bold": True}],
-                [{"token": "$cen_codex_window_1", "bold": True}],
-                [{"token": "$cen_codex_window_2", "bold": True}],
+                [{"token": "$cen_codex_weekly", "bold": True}],
             ],
         )
         self.assertEqual(
@@ -307,6 +309,20 @@ class ConflictAndMalformedTests(Base):
         self.assertEqual(r.returncode, 1)
         self.assertIn("CONFLICT", r.stdout)
         self.assertEqual(self.read(".codex/config.toml"), original)
+
+    def test_prior_cen_codex_status_line_migrates(self):
+        original = (
+            "[tui]\n"
+            'status_line = ["model-with-reasoning", "context-remaining", '
+            '"five-hour-limit", "weekly-limit"]\n'
+        )
+        self.write(".codex/config.toml", original)
+        r = self.install("--codex")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        parsed = tomllib.loads(self.read(".codex/config.toml"))
+        self.assertEqual(parsed["tui"]["status_line"], CODEX_DESIRED)
+        self.assertIn("status", parsed["tui"]["status_line"])
+        self.assertTrue(parsed["features"]["hooks"])
 
     def test_codex_toml_preserves_comments_and_unrelated_keys(self):
         original = (
@@ -425,8 +441,7 @@ class OpenCodeRowTests(Base):
     CODEX_TOML = (
         'codex = [\n  ["workspace", "tab"],\n  ["agent", "state_text"],\n'
         '  [\n    { token = "$cen_codex_identity", bold = true }\n  ],\n'
-        '  [\n    { token = "$cen_codex_window_1", bold = true }\n  ],\n'
-        '  [\n    { token = "$cen_codex_window_2", bold = true }\n  ]\n]\n'
+        '  [\n    { token = "$cen_codex_weekly", bold = true }\n  ]\n]\n'
     )
     PI_TOML = (
         'pi = [\n  ["workspace", "tab"],\n  ["agent", "state_text"],\n'
@@ -492,7 +507,7 @@ class OpenCodeRowTests(Base):
         self.assertEqual(parsed["ui"]["sidebar"]["agents"]["row_gap"], 2)
         self.assertEqual(parsed["ui"]["sidebar"]["custom_note"], "keep me")
         self.assertEqual(len(rows["agy"]), 4)
-        self.assertEqual(len(rows["codex"]), 5)
+        self.assertEqual(len(rows["codex"]), 4)
         self.assertEqual(len(rows["pi"]), 3)
         self.assertIn("# user header comment", text)
         self.assertIn("# user inline comment", text)
@@ -731,7 +746,7 @@ class HardeningTests(Base):
             ".config/herdr/config.toml")
         )["ui"]["sidebar"]["agents"]["rows_by_agent"]
         self.assertEqual(len(rows["agy"]), 4)
-        self.assertEqual(len(rows["codex"]), 5)
+        self.assertEqual(len(rows["codex"]), 4)
         self.assertEqual(len(rows["pi"]), 3)
         self.assertEqual(len(rows["opencode"]), 2)
         man = self.read_manifest()
@@ -865,26 +880,20 @@ class HardeningTests(Base):
         self.assertEqual(stat.S_IMODE(os.stat(qroot).st_mode), 0o700)
 
 
-class CodexDisplayTokenTests(unittest.TestCase):
-    """Synthetic-fixture coverage for the dual-window Codex card contract.
-
-    All fixtures are synthetic. No real account values, paths, or quotas.
-    """
+class CodexTelemetryDisplayTests(unittest.TestCase):
+    """Synthetic display/cache contract for compact weekly Codex card."""
 
     NOW = 1_000_000_000.0
-    IDENTITY = "cen_codex_identity"
-    W1 = "cen_codex_window_1"
-    W2 = "cen_codex_window_2"
-    SUMMARY = "cen_codex_summary"
 
     @classmethod
     def setUpClass(cls):
         cls._codex_dir = os.path.join(REPO, "integrations", "codex")
         sys.path.insert(0, cls._codex_dir)
-        import unittest.mock # noqa: F401
         import publisher as pub
+        import telemetry as tel
         import launcher as lch
         cls.pub = pub
+        cls.tel = tel
         cls.lch = lch
 
     @classmethod
@@ -892,145 +901,59 @@ class CodexDisplayTokenTests(unittest.TestCase):
         if cls._codex_dir in sys.path:
             sys.path.remove(cls._codex_dir)
 
-    # ── synthetic fixture builders ────────────────────────────────────────
-
-    def acc(self, local="demo", plan="PLUS"):
-        return {"account": {
-            "type": "chatgpt",
-            "email": f"{local}@example.invalid",
-            "planType": plan,
-        }}
-
-    def rl(self, primary=None, secondary=None):
-        snap = {}
-        if primary is not None:
-            snap["primary"] = primary
-        if secondary is not None:
-            snap["secondary"] = secondary
-        return {"rateLimitsByLimitId": {"codex": snap}}
-
-    def dual_rl(self):
-        return self.rl(
-            primary={
-                "usedPercent": 18,
-                "windowDurationMins": 300,
-                "resetsAt": self.NOW + 2 * 3600 + 14 * 60,
-            },
-            secondary={
-                "usedPercent": 39,
-                "windowDurationMins": 10080,
-                "resetsAt": self.NOW + 4 * 86400 + 7 * 3600,
-            },
+    def snapshot(self):
+        return self.tel.build_snapshot(
+            {"account": {"type": "chatgpt",
+                         "email": "demo@example.invalid",
+                         "planType": "plus"}},
+            {"rateLimitsByLimitId": {"codex": {
+                "primary": {"usedPercent": 18,
+                            "windowDurationMins": 300,
+                            "resetsAt": self.NOW + 3600},
+                "secondary": {"usedPercent": 39,
+                              "windowDurationMins": 10080,
+                              "resetsAt": self.NOW + 4 * 86400 + 7 * 3600},
+            }}},
+            now_epoch=self.NOW,
         )
 
-    def build(self, acc_res, rl_res):
-        return self.pub.build_display_tokens(
-            acc_res, rl_res, now_epoch=self.NOW)
+    def test_sidebar_is_identity_plus_weekly_only(self):
+        tok = self.pub.display_tokens(self.snapshot(), now_epoch=self.NOW)
+        self.assertEqual(tok["cen_codex_identity"], "demo · PLUS")
+        self.assertEqual(tok["cen_codex_weekly"], "7D 61% · ↻4d7h")
+        self.assertIsNone(tok["cen_codex_window_1"])
+        self.assertIsNone(tok["cen_codex_window_2"])
+        self.assertIsNone(tok["cen_codex_summary"])
+        self.assertNotIn("5H", " ".join(v for v in tok.values()
+                                         if isinstance(v, str)))
 
-    # ── cases 1-3: dual windows, LEFT math, countdown truth ──────────────
-
-    def test_dual_windows_percent_and_countdowns(self):
-        tok = self.build(self.acc(), self.dual_rl())
-        self.assertEqual(tok[self.IDENTITY], "demo · PLUS")
-        self.assertEqual(tok[self.W1], "5H 82% · ↻2h14m")
-        self.assertEqual(tok[self.W2], "7D 61% · ↻4d7h")
-
-    def test_left_percent_clamped_bounds(self):
-        rl = self.rl(
-            primary={"usedPercent": 0, "windowDurationMins": 300},
-            secondary={"usedPercent": 150, "windowDurationMins": 10080},
+    def test_invalid_weekly_fails_closed(self):
+        snap = self.tel.build_snapshot(
+            {"account": {"type": "chatgpt",
+                         "email": "demo@example.invalid",
+                         "planType": "plus"}},
+            {"rateLimits": {
+                "primary": {"usedPercent": 10, "windowDurationMins": 300},
+                "secondary": {"usedPercent": float("nan"),
+                              "windowDurationMins": 10080},
+            }},
+            now_epoch=self.NOW,
         )
-        tok = self.build(self.acc(), rl)
-        self.assertEqual(tok[self.W1], "5H 100%")
-        self.assertEqual(tok[self.W2], "7D 0%")
+        tok = self.pub.display_tokens(snap, now_epoch=self.NOW)
+        self.assertEqual(tok["cen_codex_weekly"], "—")
 
-    def test_countdown_reset_in_past_renders_now(self):
-        rl = self.rl(primary={
-            "usedPercent": 50, "windowDurationMins": 300,
-            "resetsAt": self.NOW - 60,
-        })
-        tok = self.build(self.acc(), rl)
-        self.assertEqual(tok[self.W1], "5H 50% · ↻now")
+    def test_full_email_never_persisted_or_rendered(self):
+        snap = self.snapshot()
+        self.assertNotIn("@", json.dumps(snap))
+        tok = self.pub.display_tokens(snap, now_epoch=self.NOW)
+        self.assertNotIn("@", tok["cen_codex_identity"])
 
-    # ── cases 4-7: degraded window sets ──────────────────────────────────
-
-    def test_primary_only_secondary_slot_fails_closed(self):
-        rl = self.rl(primary={
-            "usedPercent": 18, "windowDurationMins": 300,
-            "resetsAt": self.NOW + 8040,
-        })
-        tok = self.build(self.acc(), rl)
-        self.assertEqual(tok[self.W1], "5H 82% · ↻2h14m")
-        self.assertEqual(tok[self.W2], "—")
-
-    def test_nonfinite_secondary_fails_closed(self):
-        for bad in (float("nan"), float("inf"), "not-a-number"):
-            with self.subTest(bad=bad):
-                rl = self.rl(
-                    primary={"usedPercent": 10, "windowDurationMins": 300},
-                    secondary={"usedPercent": bad,
-                               "windowDurationMins": 10080},
-                )
-                tok = self.build(self.acc(), rl)
-                self.assertEqual(tok[self.W1], "5H 90%")
-                self.assertEqual(tok[self.W2], "—")
-
-    def test_missing_resetsat_quota_without_countdown(self):
-        rl = self.rl(
-            primary={"usedPercent": 18, "windowDurationMins": 300},
-            secondary={"usedPercent": 39, "windowDurationMins": 10080},
-        )
-        tok = self.build(self.acc(), rl)
-        self.assertEqual(tok[self.W1], "5H 82%")
-        self.assertNotIn("↻", tok[self.W1])
-        self.assertEqual(tok[self.W2], "7D 61%")
-        self.assertNotIn("↻", tok[self.W2])
-
-    def test_both_windows_absent_fail_closed(self):
-        for rl_res in (None, {}, {"rateLimitsByLimitId": {}}, self.rl()):
-            with self.subTest(rl=bool(rl_res)):
-                tok = self.build(self.acc(), rl_res)
-                self.assertEqual(tok[self.W1], "—")
-                self.assertEqual(tok[self.W2], "—")
-
-    # ── cases 8-9: identity sanitization + privacy ───────────────────────
-
-    def test_identity_sanitization(self):
-        acc = self.acc(local="de\x1b[31mmo\x07bad", plan="plus ")
-        tok = self.build(acc, None)
-        self.assertEqual(tok[self.IDENTITY], "demobad · PLUS")
-
-    def test_full_email_never_rendered(self):
-        tok = self.build(self.acc(local="someone"), self.dual_rl())
-        for key, value in tok.items():
-            if value is None:
-                continue
-            self.assertNotIn("@", value, key)
-            self.assertNotIn("example.invalid", value, key)
-
-    def test_unusable_account_fails_closed(self):
-        for acc_res in (None, {}, {"account": {}}, {"account": "junk"}):
-            with self.subTest(acc=bool(acc_res)):
-                tok = self.build(acc_res, self.dual_rl())
-                self.assertEqual(tok[self.IDENTITY], "—")
-
-    # ── case 10: two-window → one-window transition clears slot 2 ────────
-
-    def test_switch_to_single_window_clears_second_token(self):
-        two = self.build(self.acc(), self.dual_rl())
-        one = self.build(self.acc(), self.rl(primary={
-            "usedPercent": 18, "windowDurationMins": 300,
-            "resetsAt": self.NOW + 8040,
-        }))
-        expected_keys = {self.IDENTITY, self.W1, self.W2, self.SUMMARY}
-        self.assertTrue(expected_keys.issubset(two))
-        self.assertTrue(expected_keys.issubset(one))
-        self.assertEqual(two[self.W2], "7D 61% · ↻4d7h")
-        self.assertEqual(one[self.W2], "—")
-        self.assertIsNone(one[self.SUMMARY])
-        self.assertIsNone(two[self.SUMMARY])
-
-    # ── case 11: ownership-aware cleanup race protection ─────────────────
+    def test_fail_closed_token_set(self):
+        tok = self.pub.fail_closed_tokens()
+        self.assertEqual(tok["cen_codex_identity"], "—")
+        self.assertEqual(tok["cen_codex_weekly"], "—")
+        self.assertIsNone(tok["cen_codex_window_1"])
+        self.assertIsNone(tok["cen_codex_window_2"])
 
     def test_cleanup_skips_newer_registration(self):
         calls = []
@@ -1045,7 +968,7 @@ class CodexDisplayTokenTests(unittest.TestCase):
         self.assertFalse(performed)
         self.assertEqual(calls, [])
 
-    def test_cleanup_failcloses_all_tokens_when_owner_matches(self):
+    def test_cleanup_failcloses_weekly_and_retires_old_tokens(self):
         recorded = []
         own = "AAAA1111BBBB@4242"
         with unittest.mock.patch.object(
@@ -1057,42 +980,25 @@ class CodexDisplayTokenTests(unittest.TestCase):
                 performed = self.lch.ownership_aware_cleanup(
                     "/tmp/sock-unused", "pane-1", own)
         self.assertTrue(performed)
-        self.assertEqual(len(recorded), 2)
-        profile_call, bridge_call = recorded
-        self.assertEqual(profile_call[2], self.lch.LAUNCHER_SOURCE)
-        self.assertEqual(profile_call[4], {"cen_codex_profile": None})
-        self.assertEqual(bridge_call[2], self.lch.BRIDGE_SOURCE)
-        self.assertEqual(bridge_call[4], {
+        self.assertEqual(recorded[1][4], {
             "cen_codex_identity": "—",
-            "cen_codex_window_1": "—",
-            "cen_codex_window_2": "—",
+            "cen_codex_weekly": "—",
+            "cen_codex_window_1": None,
+            "cen_codex_window_2": None,
             "cen_codex_summary": None,
         })
-
-    def test_cleanup_noop_on_unreadable_pane(self):
-        with unittest.mock.patch.object(
-                self.lch, "pane_get_tokens", return_value=None):
-            with unittest.mock.patch.object(
-                    self.lch, "report_metadata") as rep_mock:
-                performed = self.lch.ownership_aware_cleanup(
-                    "/tmp/sock-unused", "pane-1", "AAAA1111BBBB@4242")
-        self.assertFalse(performed)
-        rep_mock.assert_not_called()
-
-    # ── fail-closed publisher surface ─────────────────────────────────────
-
-    def test_publisher_fail_closed_token_set(self):
-        tok = self.pub.fail_closed_tokens()
-        self.assertEqual(tok[self.IDENTITY], "—")
-        self.assertEqual(tok[self.W1], "—")
-        self.assertEqual(tok[self.W2], "—")
-        self.assertIsNone(tok[self.SUMMARY])
 
 
 class InstallerMigrationTests(Base):
     """Legacy-shape migration + drift-manifest retirement (synthetic only)."""
 
     CURRENT_CODEX_VALUE = [
+        ["workspace", "tab"],
+        ["agent", "state_text"],
+        [{"token": "$cen_codex_identity", "bold": True}],
+        [{"token": "$cen_codex_weekly", "bold": True}],
+    ]
+    LEGACY_V020_CODEX_VALUE = [
         ["workspace", "tab"],
         ["agent", "state_text"],
         [{"token": "$cen_codex_identity", "bold": True}],
@@ -1255,6 +1161,18 @@ class InstallerMigrationTests(Base):
             parsed["ui"]["sidebar"]["agents"]["rows_by_agent"]["codex"],
             self.LEGACY_CODEX_VALUE)
         self.assertFalse(os.path.exists(self.manifest_path()))
+
+    def test_v020_five_row_shape_migrates_to_weekly_only(self):
+        self.write_herdr_config(self._toml_block(
+            "codex", self.LEGACY_V020_CODEX_VALUE))
+        r = self.install("--herdr")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rows = tomllib.loads(self.read(
+            ".config/herdr/config.toml")
+        )["ui"]["sidebar"]["agents"]["rows_by_agent"]
+        self.assertEqual(rows["codex"], self.CURRENT_CODEX_VALUE)
+        self.assertNotIn("$cen_codex_window_1",
+                         self.read(".config/herdr/config.toml"))
 
     def test_current_shape_is_noop(self):
         self.write_herdr_config(self._toml_block(

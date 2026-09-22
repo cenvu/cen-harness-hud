@@ -123,6 +123,21 @@ def insert_toml_key(text: str, table: tuple, key: str, literal_lines: list) -> s
     return result
 
 
+def insert_toml_scalar(text: str, table: tuple, key: str, literal: str) -> str:
+    """Insert one scalar key without rewriting unrelated TOML bytes."""
+    lines = text.splitlines()
+    block = [f"{key} = {literal}"]
+    start, end = find_section_span(lines, table)
+    if start is None:
+        new_lines = lines + ["", "[" + ".".join(table) + "]"] + block
+    else:
+        new_lines = lines[:end] + block + lines[end:]
+    result = "\n".join(new_lines)
+    if text.endswith("\n"):
+        result += "\n"
+    return result
+
+
 def _find_array_block_end(lines: list, start: int) -> int:
     """Return the index of the line closing the top-level array whose
     opener is line `start` (`key = [`).
@@ -174,32 +189,48 @@ def _find_array_block_end(lines: list, start: int) -> int:
 
 def replace_toml_key(text: str, table: tuple, key: str,
                      literal_lines: list) -> str:
-    """Replace ONLY an existing `key = [` ... outer-close block inside
-    [table].
+    """Replace ONLY an existing `key = ...` array inside [table].
 
-    Narrowly scoped to the CEN-owned multiline array-block layout this
-    product itself writes; nested arrays are handled by the bounded depth
-    scanner above so an inner closing bracket can never terminate the
-    replacement early. Anything else (single-line arrays, missing block,
-    unbalanced input) raises — callers must fail closed. The caller must
-    already have verified the current PARSED value; this helper is purely
-    mechanical line replacement and touches no other byte of the file.
+    Handles both the CEN-owned multiline array-block layout this product
+    writes (`key = [` ... outer-close) and a single-line owned array
+    (`key = [...]` on one line, e.g. hand-edited or upstream-normalized
+    TOML). Nested arrays are handled by the bounded depth scanner so an
+    inner closing bracket can never terminate the replacement early.
+    Anything else (missing block, unbalanced input) raises — callers must
+    fail closed. The caller must already have verified the current PARSED
+    value; this helper is purely mechanical line replacement and touches
+    no other byte of the file.
     """
     lines = text.splitlines()
     sec_start, sec_end = find_section_span(lines, table)
     if sec_start is None:
         raise ValueError("target table not found: " + ".".join(table))
     opener = "{k} = [".format(k=key)
+    key_re = re.compile(r"^\s*\"?%s\"?\s*=" % re.escape(key))
     key_start = None
+    single_line = False
     for i in range(sec_start, min(sec_end, len(lines))):
+        stripped = lines[i].strip()
         if lines[i].rstrip() == opener:
             key_start = i
+            single_line = False
             break
+        if key_re.match(lines[i]):
+            # Candidate single-line owned array: must contain an array
+            # opener. The caller verified the parsed value is owned, so
+            # this line is the owned key. Replace just this line.
+            if "[" in lines[i]:
+                key_start = i
+                single_line = True
+                break
     if key_start is None:
         raise ValueError("owned key block not found: " + key)
-    key_end = _find_array_block_end(lines, key_start)
     block = [opener] + list(literal_lines) + ["]"]
-    new_lines = lines[:key_start] + block + lines[key_end + 1:]
+    if single_line:
+        new_lines = lines[:key_start] + block + lines[key_start + 1:]
+    else:
+        key_end = _find_array_block_end(lines, key_start)
+        new_lines = lines[:key_start] + block + lines[key_end + 1:]
     result = "\n".join(new_lines)
     if text.endswith("\n"):
         result += "\n"

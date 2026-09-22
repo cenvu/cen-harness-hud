@@ -115,7 +115,12 @@ def normalize_quota_window(window: Any, now_epoch: Optional[float] = None) -> Op
 
 
 def format_identity(account_data: Any, term_width: int = 120) -> str:
-    """Derive identity string from account/read result."""
+    """Derive identity string from account/read result.
+
+    Privacy contract: NEVER render a full email address at any
+    terminal width — always the sanitized local-part only. `term_width`
+    is retained for signature compatibility but no longer affects output.
+    """
     if not account_data or not isinstance(account_data, dict):
         return "account —"
     acc = account_data.get("account")
@@ -129,7 +134,9 @@ def format_identity(account_data: Any, term_width: int = 120) -> str:
     if acc_type == "apikey":
         id_part = "API KEY"
     elif email:
-        id_part = email if term_width >= 100 else email.split("@")[0]
+        id_part = email.split("@")[0] if "@" in email else email
+        if not id_part:
+            id_part = "account —"
     else:
         id_part = "account —"
     if plan and id_part != "account —":
@@ -361,6 +368,112 @@ def query_app_server(
                     pass
         if reader_thread and reader_thread.is_alive():
             reader_thread.join(timeout=0.2)
+
+
+def query_app_server_request(
+    method: str,
+    params: Optional[Dict[str, Any]] = None,
+    total_timeout_sec: float = 3.0,
+    codex_home: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Bounded one-request app-server helper for session ownership probes."""
+    codex_bin = shutil.which("codex")
+    if not codex_bin:
+        return None
+    child_env = None
+    if codex_home is not None:
+        child_env = os.environ.copy()
+        child_env["CODEX_HOME"] = codex_home
+    proc = None
+    line_queue: queue.Queue = queue.Queue()
+    reader_thread = None
+    deadline = time.time() + total_timeout_sec
+    try:
+        proc = subprocess.Popen(
+            [codex_bin, "app-server", "--stdio"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            env=child_env,
+        )
+        reader_thread = threading.Thread(
+            target=_stdout_reader_thread,
+            args=(proc.stdout, line_queue),
+            daemon=True,
+        )
+        reader_thread.start()
+
+        def send(req):
+            if proc and proc.stdin:
+                proc.stdin.write(json.dumps(req) + "\n")
+                proc.stdin.flush()
+
+        def recv(req_id, step=1.5):
+            stop = min(deadline, time.time() + step)
+            while time.time() < stop:
+                try:
+                    line = line_queue.get(timeout=max(0.01, stop - time.time()))
+                except queue.Empty:
+                    return None
+                if line is None:
+                    return None
+                try:
+                    msg = json.loads(line)
+                except Exception:
+                    continue
+                if msg.get("id") == req_id:
+                    if msg.get("error") is not None:
+                        return None
+                    result = msg.get("result")
+                    return result if isinstance(result, dict) else None
+            return None
+
+        send({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"clientInfo": {"name": "cen-codex-status", "version": "1.0.0"}},
+        })
+        if recv(1) is None:
+            return None
+        send({"jsonrpc": "2.0", "id": 2, "method": method, "params": params or {}})
+        return recv(2, step=2.0)
+    except Exception:
+        return None
+    finally:
+        if proc:
+            try:
+                if proc.stdin:
+                    proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                proc.terminate()
+                proc.wait(timeout=0.3)
+            except Exception:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=0.3)
+                except Exception:
+                    pass
+        if reader_thread and reader_thread.is_alive():
+            reader_thread.join(timeout=0.1)
+
+
+def thread_exists(session_id: str, codex_home: Optional[str] = None) -> bool:
+    """True only when this Codex profile can read the native thread id."""
+    if not isinstance(session_id, str) or not session_id.strip():
+        return False
+    result = query_app_server_request(
+        "thread/read",
+        {"threadId": session_id, "includeTurns": False},
+        total_timeout_sec=3.0,
+        codex_home=codex_home,
+    )
+    thread = result.get("thread") if isinstance(result, dict) else None
+    return isinstance(thread, dict) and str(thread.get("id") or "") == session_id
 
 
 def main() -> None:

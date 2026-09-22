@@ -79,6 +79,7 @@ def install_product_files(ctx: Context, journal: list) -> None:
     exec_relpaths = {
         os.path.join("integrations", "codex", "launcher.py"),
         os.path.join("integrations", "codex", "status.py"),
+        os.path.join("integrations", "codex", "session_hook.py"),
     }
     for root, dirs, files in os.walk(ctx.install_root):
         for name in dirs:
@@ -176,6 +177,17 @@ def _apply_action(ctx, act: dict, journal: list,
         atomic_write(path, patching.dump_json(data), rec["original_mode"])
         return
 
+    if kind == "patch_json_document":
+        path = act["path"]
+        current = patching.load_json(path)
+        if current != act["expected_current_data"]:
+            raise ComponentError(
+                "stale plan: JSON document changed before apply in %s" % path)
+        rec = _backup_once(path, backup_dir, originals, journal)
+        atomic_write(path, patching.dump_json(act["desired_data"]),
+                     rec["original_mode"])
+        return
+
     if kind == "patch_toml_insert":
         path = act["path"]
         rec = _backup_once(path, backup_dir, originals, journal)
@@ -184,6 +196,23 @@ def _apply_action(ctx, act: dict, journal: list,
         new_text = patching.insert_toml_key(
             text, tuple(act["table"]), act["key"], act["literal_lines"]
         )
+        atomic_write(path, new_text.encode(), rec["original_mode"])
+        return
+
+    if kind == "patch_toml_scalar_insert":
+        path = act["path"]
+        rec = _backup_once(path, backup_dir, originals, journal)
+        with open(path, "r") as f:
+            text = f.read()
+        if patching.classify_toml_key(
+                text, tuple(act["table"]), act["key"],
+                act["desired_value"]) != "absent":
+            raise ComponentError(
+                "stale plan: scalar key %s is no longer absent in %s"
+                % (act["key"], path))
+        new_text = patching.insert_toml_scalar(
+            text, tuple(act["table"]), act["key"], act["literal"])
+        patching.toml_value(new_text)
         atomic_write(path, new_text.encode(), rec["original_mode"])
         return
 
@@ -239,6 +268,10 @@ def _verify_action(ctx, act: dict) -> None:
             assert any(e.get("plugin_id") == entry["plugin_id"]
                        for e in data if isinstance(e, dict))
         return
+    if kind == "patch_json_document":
+        data = patching.load_json(act["path"])
+        assert data == act["desired_data"], "JSON post-mutation verification failed"
+        return
     if kind == "patch_toml_insert":
         with open(act["path"]) as f:
             parsed = patching.toml_value(f.read())
@@ -247,6 +280,15 @@ def _verify_action(ctx, act: dict) -> None:
             node = node[t]
         assert node[act["key"]] == act["desired_value"], \
             f"TOML post-mutation verification failed for {act['key']}"
+        return
+    if kind == "patch_toml_scalar_insert":
+        with open(act["path"]) as f:
+            parsed = patching.toml_value(f.read())
+        node = parsed
+        for t in act["table"]:
+            node = node[t]
+        assert node[act["key"]] == act["desired_value"], \
+            f"TOML scalar verification failed for {act['key']}"
         return
     if kind == "patch_toml_replace_owned":
         with open(act["path"]) as f:

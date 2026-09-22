@@ -115,6 +115,47 @@ def run_doctor(ctx: Context, out=print) -> int:
         except Exception as e:
             rec("codex:tui-status-line", "FAIL", f"TOML parse error: {e}")
 
+    # Codex native hook feature + SessionStart telemetry hook
+    p = ctx.codex_config_path
+    if os.path.exists(p):
+        try:
+            with open(p) as f:
+                parsed = patching.toml_value(f.read())
+            hooks_enabled = (parsed.get("features") or {}).get("hooks")
+            if hooks_enabled is True:
+                rec("codex:hooks-feature", "PASS", "enabled")
+            elif hooks_enabled is None:
+                rec("codex:hooks-feature", "SKIP", "unset")
+            else:
+                rec("codex:hooks-feature", "FAIL", "disabled/foreign")
+        except Exception as e:
+            rec("codex:hooks-feature", "FAIL", f"TOML parse error: {e}")
+
+    p = ctx.codex_hooks_path
+    if not os.path.exists(p):
+        rec("codex:session-hook", "SKIP", "hooks.json absent")
+    else:
+        try:
+            data = patching.load_json(p)
+            hooks = data.get("hooks") if isinstance(data, dict) else None
+            entries = hooks.get("SessionStart") if isinstance(hooks, dict) else None
+            found = False
+            if isinstance(entries, list):
+                for entry in entries:
+                    nested = entry.get("hooks") if isinstance(entry, dict) else None
+                    if not isinstance(nested, list):
+                        continue
+                    for hook in nested:
+                        if (isinstance(hook, dict)
+                                and hook.get("type") == "command"
+                                and hook.get("command")
+                                    == ctx.codex_session_hook_installed):
+                            found = True
+            rec("codex:session-hook", "PASS" if found else "FAIL",
+                "CEN-owned" if found else "missing")
+        except Exception as e:
+            rec("codex:session-hook", "FAIL", f"malformed: {e}")
+
     # Pi extension
     link = os.path.join(ctx.pi_ext_dir, "deepseek-balance.ts")
     if not os.path.lexists(link):

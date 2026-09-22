@@ -16,7 +16,7 @@ no resident daemon of its own, no database.
 | Integration | Display surface | Shows |
 |---|---|---|
 | **AGY** (Antigravity CLI) | Native statusline footer + Herdr sidebar card | Account identity/plan, four quota pools (Gemini 5H/W, Claude/GPT 5H/W), reset countdowns |
-| **Codex CLI** | Native TUI status line, one-shot CLI helper, Herdr sidebar card | Model/context rows; structured short/long rate-limit remaining percentages; Herdr card adds identity/plan plus both structured window LEFT % with reset countdown snapshots |
+| **Codex CLI** | Native TUI status line, one-shot CLI helper, Herdr sidebar card | Native footer: model/reasoning, native run status, context remaining, short-window and weekly remaining % (no reset countdown in the native footer through current built-in items); helper: sanitized short account alias + plan with structured quota/reset info; Herdr card: native lifecycle state, alias/plan, WEEKLY remaining % with reset countdown snapshot — short-window quota stays native-footer-only and is NOT duplicated in Herdr |
 | **Pi Coding Agent** | Native Pi footer widget | DeepSeek key fingerprint and PAYG balance |
 | **OpenCode** | Herdr sidebar card (requires Herdr) | Herdr-native lifecycle state. State is supplied by Herdr's own OpenCode detection, not a CEN OpenCode publisher. Live validation observed idle/working/done; other Herdr-native states render when detected |
 | **Herdr multiplexer** | Sidebar agent cards | Compact per-agent identity/quota/balance summaries |
@@ -41,7 +41,8 @@ no resident daemon of its own, no database.
   optional Pi balance feature, which queries DeepSeek's official balance
   endpoint with *your* existing DeepSeek API key. The Codex integration does
   not implement its own HTTP client; it invokes the external Codex app-server
-  over stdio. External harnesses may of course perform their own network
+  over stdio (structured RPC) and learns the active profile from the native
+  SessionStart hook. External harnesses may of course perform their own network
   activity according to their own behavior and configuration.
 - **Installer credential boundary** — the installer never reads or migrates
   credentials (`auth.json`, keychains, token stores). The optional Pi balance

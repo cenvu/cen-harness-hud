@@ -43,6 +43,10 @@ class Context:
         return os.path.join(self.home, ".codex", "config.toml")
 
     @property
+    def codex_hooks_path(self) -> str:
+        return os.path.join(self.home, ".codex", "hooks.json")
+
+    @property
     def pi_ext_dir(self) -> str:
         return os.path.join(self.home, ".pi", "agent", "extensions")
 
@@ -74,6 +78,12 @@ class Context:
     @property
     def codex_status_installed(self) -> str:
         return os.path.join(self.install_root, "integrations", "codex", "status.py")
+
+    @property
+    def codex_session_hook_installed(self) -> str:
+        return os.path.join(
+            self.install_root, "integrations", "codex", "session_hook.py"
+        )
 
     @property
     def pi_extension_installed(self) -> str:

@@ -82,8 +82,21 @@ def main():
         if not os.path.isfile(CODEX_PUBLISHER):
             sys.exit(0)
         try:
+            env = dict(os.environ)
+            event_name = str(
+                event_data.get("event")
+                or event_data.get("event_name")
+                or os.environ.get("HERDR_PLUGIN_EVENT", "")
+            ).lower()
+            if "agent_detected" in event_name:
+                env["CEN_CODEX_REFRESH_REASON"] = "agent_detected"
+            elif "status_changed" in event_name:
+                env["CEN_CODEX_REFRESH_REASON"] = "state_changed"
+            else:
+                env["CEN_CODEX_REFRESH_REASON"] = "event"
             subprocess.run(
                 [sys.executable, CODEX_PUBLISHER],
+                env=env,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,

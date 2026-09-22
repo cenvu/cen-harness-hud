@@ -27,6 +27,14 @@ CODEX_ROWS = [
     ["workspace", "tab"],
     ["agent", "state_text"],
     [{"token": "$cen_codex_identity", "bold": True}],
+    [{"token": "$cen_codex_weekly", "bold": True}],
+]
+# Exact Codex row shape produced by public v0.2.0. It is CEN-owned and may
+# migrate to the compact weekly-only card.
+CODEX_ROWS_LEGACY_V020 = [
+    ["workspace", "tab"],
+    ["agent", "state_text"],
+    [{"token": "$cen_codex_identity", "bold": True}],
     [{"token": "$cen_codex_window_1", "bold": True}],
     [{"token": "$cen_codex_window_2", "bold": True}],
 ]
@@ -71,10 +79,7 @@ ROWS_LITERAL = {
         '    { token = "$cen_codex_identity", bold = true }',
         "  ],",
         "  [",
-        '    { token = "$cen_codex_window_1", bold = true }',
-        "  ],",
-        "  [",
-        '    { token = "$cen_codex_window_2", bold = true }',
+        '    { token = "$cen_codex_weekly", bold = true }',
         "  ]",
     ],
     "pi": [
@@ -260,18 +265,29 @@ def plan(ctx) -> dict:
             any_row_action = True
         elif status == "equal":
             notes.append(f"herdr rows[{key}] already CEN-owned — no-op")
-        elif key == "codex" and patching.classify_toml_key(
-                text, ROWS_TABLE, key, CODEX_ROWS_LEGACY_V010) == "equal":
-            # Exact known CEN v0.1.0 output with no surviving ownership
-            # record → controlled migration to the current shape.
-            notes.append("herdr rows[codex]: exact legacy CEN shape "
-                         "detected — will migrate in place")
+        elif key == "codex":
+            legacy_value = None
+            if patching.classify_toml_key(
+                    text, ROWS_TABLE, key, CODEX_ROWS_LEGACY_V020) == "equal":
+                legacy_value = CODEX_ROWS_LEGACY_V020
+            elif patching.classify_toml_key(
+                    text, ROWS_TABLE, key, CODEX_ROWS_LEGACY_V010) == "equal":
+                legacy_value = CODEX_ROWS_LEGACY_V010
+            if legacy_value is None:
+                raise ConflictError(
+                    "herdr: foreign rows_by_agent.codex present; refusing to "
+                    "overwrite"
+                )
+            notes.append(
+                "herdr rows[codex]: exact prior CEN shape detected — "
+                "will migrate in place"
+            )
             actions.append({
                 "type": "patch_toml_replace_owned",
                 "path": cfg_path,
                 "table": ROWS_TABLE,
                 "key": key,
-                "expected_current_value": CODEX_ROWS_LEGACY_V010,
+                "expected_current_value": legacy_value,
                 "literal_lines": ROWS_LITERAL[key],
                 "desired_value": value,
                 "backup_name": "herdr-config.toml",
