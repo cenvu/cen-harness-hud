@@ -18,7 +18,7 @@ from installer import doctor as doctor_mod # noqa: E402
 from installer import transaction # noqa: E402
 from installer.paths import Context # noqa: E402
 
-COMPONENT_FLAGS = ("agy", "codex", "pi", "herdr")
+COMPONENT_FLAGS = ("agy", "claude", "codex", "pi", "herdr")
 
 
 def _version() -> str:

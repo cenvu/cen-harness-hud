@@ -4,7 +4,25 @@
 
 - **macOS, Apple Silicon (arm64)** — validated end-to-end by the maintainer:
   install, doctor, runtime surfaces (AGY statusline, Codex status line and
-  helper, Pi footer, Herdr sidebar cards), uninstall/rollback.
+  helper, Pi footer, Claude Code StatusLine and Herdr sidebar cards),
+  uninstall/rollback.
+
+## Claude Code support
+
+Officially supported behavior includes:
+
+- native Claude Code StatusLine integration
+- Herdr-native Claude lifecycle state
+- model and context metadata from structured StatusLine JSON
+- optional five-hour/seven-day Claude rate-limit LEFT% and reset metadata when
+  supplied
+- clean fail-open behavior when quota data is missing or malformed
+- schema-2 semantic ownership for the nested Claude StatusLine settings
+
+dsclaude is compatible through the Claude Code harness adapter and Herdr
+Claude state/session architecture. Claude.ai subscription quota is suppressed
+when custom-provider routing is present. CEN HUD does not currently provide a
+separate quota adapter for that custom provider.
 
 ## Experimental / unvalidated
 
@@ -25,7 +43,7 @@ The code is POSIX-oriented, but no claims are made until tested.
 - Herdr may need a configuration reload or restart after (re)installing
   before new sidebar/plugin configuration is visible.
 
-## Installer ownership behavior (v0.3.1)
+## Installer ownership behavior (v0.3.1 and later)
 
 - Schema-2 semantic uninstall: only CEN-owned config surfaces are
   reversed; unrelated user edits in the same file are preserved.

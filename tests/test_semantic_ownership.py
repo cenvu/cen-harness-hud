@@ -91,6 +91,19 @@ class AggyOwnershipTests(Base):
 class HerdrRowOwnershipTests(Base):
     """Matrix 5-6 + F-3 acceptance."""
 
+    CLAUDE_STATE_ONLY = (
+        'claude = [\n  ["workspace", "tab"],\n'
+        '  ["agent", "state_text"]\n]\n'
+    )
+    CLAUDE_METADATA = (
+        'claude = [\n  ["workspace", "tab"],\n'
+        '  ["agent", "state_text"],\n'
+        '  [\n    { token = "$cen_claude_model_context", bold = true }\n'
+        '  ],\n'
+        '  [\n    { token = "$cen_claude_quota", bold = true }\n'
+        '  ]\n]\n'
+    )
+
     CODEX_V020 = (
         'codex = [\n  ["workspace", "tab"],\n  ["agent", "state_text"],\n'
         '  [\n    { token = "$cen_codex_identity", bold = true }\n  ],\n'
@@ -132,9 +145,29 @@ class HerdrRowOwnershipTests(Base):
         r = self.cli("uninstall")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         rows = rows_of(self)
-        for key in ("agy", "codex", "pi", "opencode"):
+        for key in ("agy", "codex", "pi", "opencode", "claude"):
             self.assertNotIn(key, rows)
         print("HERDR_INHERITED_CEN_ROWS_AFTER_FINAL_UNINSTALL=NO")
+
+    def test_claude_exact_compatible_shapes_remain_unclaimed(self):
+        for shape in (self.CLAUDE_METADATA, self.CLAUDE_STATE_ONLY):
+            with self.subTest(shape=shape):
+                self.write(
+                    ".config/herdr/config.toml",
+                    "[ui.sidebar.agents.rows_by_agent]\n" + shape,
+                )
+                r = self.install("--herdr")
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                records = [
+                    rec for rec in self.read_manifest()["semantic_patches"]
+                    if rec["key"] == "claude"
+                ]
+                self.assertEqual(records, [])
+                self.assertEqual(self.cli("uninstall").returncode, 0)
+                self.assertIn(
+                    "claude =",
+                    self.read(".config/herdr/config.toml"),
+                )
 
 
 class CodexOwnershipTests(Base):

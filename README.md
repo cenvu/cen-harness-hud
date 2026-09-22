@@ -19,7 +19,17 @@ no resident daemon of its own, no database.
 | **Codex CLI** | Native TUI status line, one-shot CLI helper, Herdr sidebar card | Native footer: model/reasoning, native run status, context remaining, short-window and weekly remaining % (no reset countdown in the native footer through current built-in items); helper: sanitized short account alias + plan with structured quota/reset info; Herdr card: native lifecycle state, alias/plan, WEEKLY remaining % with reset countdown snapshot — short-window quota stays native-footer-only and is NOT duplicated in Herdr |
 | **Pi Coding Agent** | Native Pi footer widget | DeepSeek key fingerprint and PAYG balance |
 | **OpenCode** | Herdr sidebar card (requires Herdr) | Herdr-native lifecycle state. State is supplied by Herdr's own OpenCode detection, not a CEN OpenCode publisher. Live validation observed idle/working/done; other Herdr-native states render when detected |
+| **Claude Code** | Native StatusLine + Herdr sidebar card | Herdr-native lifecycle state; model/context from structured StatusLine JSON; optional five-hour/seven-day Claude rate-limit LEFT% and reset countdown when supplied; no identity or plan row; no fabricated quota when unavailable |
 | **Herdr multiplexer** | Sidebar agent cards | Compact per-agent identity/quota/balance summaries |
+
+### dsclaude compatibility
+
+dsclaude reuses the Claude Code harness adapter and Herdr-native Claude
+state/session architecture. Model and context metadata may come from the
+Claude StatusLine JSON payload. When `ANTHROPIC_BASE_URL` is present, the
+Claude adapter suppresses Claude.ai subscription quota and reset metadata.
+CEN HUD does not currently provide a separate DeepSeek or other
+custom-provider quota adapter for dsclaude.
 
 ## Platform support
 
@@ -30,7 +40,7 @@ no resident daemon of its own, no database.
 ## Design principles
 
 - **No third-party packages bundled by CEN HUD** — the Python components
-  (installer, AGY/Codex/Herdr integrations) use the Python standard library
+  (installer, AGY/Claude/Codex/Herdr integrations) use the Python standard library
   only; the Pi extension is TypeScript using Node built-ins supplied by the
   Pi runtime. CEN HUD installs no runtime and bundles no npm/Python package.
 - **Offline installer** — the CEN HUD installer itself requires no network,
@@ -68,13 +78,11 @@ supported platforms, and [PRIVACY.md](PRIVACY.md) for what is stored locally.
 CEN Harness HUD is intentionally extensible, and contributors are welcome to
 add more harness adapters.
 
-**Currently supported:** AGY / Antigravity · Codex CLI · Pi Coding Agent /
-DeepSeek balance · OpenCode (Herdr-native state card) · Herdr.
+**Currently supported:** AGY / Antigravity · Claude Code · Codex CLI · Pi
+Coding Agent / DeepSeek balance · OpenCode (Herdr-native state card) · Herdr.
 
 **Planned / candidate integrations** (not implemented yet):
 
-- Claude Code
-- dsclaude
 - Hermes
 - DSH
 - other coding harnesses/providers where a stable native or structured status

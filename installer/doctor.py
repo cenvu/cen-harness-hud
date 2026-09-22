@@ -7,8 +7,16 @@ import os
 
 from . import discover, manifest, patching
 from .components.agy import desired_command
+from .components.claude import desired_command as claude_desired_command
 from .components.codex import STATUS_LINE_DESIRED
-from .components.herdr import AGY_ROWS, CODEX_ROWS, OPENCODE_ROWS, PI_ROWS
+from .components.herdr import (
+    AGY_ROWS,
+    CLAUDE_ROWS,
+    CLAUDE_ROWS_STATE_ONLY,
+    CODEX_ROWS,
+    OPENCODE_ROWS,
+    PI_ROWS,
+)
 from .paths import Context
 
 
@@ -95,6 +103,32 @@ def run_doctor(ctx: Context, out=print) -> int:
                 rec("agy:statusline", "FAIL", "foreign command")
         except Exception as e:
             rec("agy:statusline", "FAIL", f"unreadable/malformed: {e}")
+
+    # Claude Code native StatusLine configuration. Exact values are reported
+    # neutrally because a matching pre-existing command may be user-owned.
+    p = ctx.claude_settings_path
+    if not os.path.exists(p):
+        rec("claude:statusline", "SKIP", "settings.json absent")
+    else:
+        try:
+            data = patching.load_json(p)
+            if not isinstance(data, dict):
+                rec("claude:statusline", "FAIL",
+                    "settings.json root is not a JSON object")
+            elif "statusLine" not in data:
+                rec("claude:statusline", "SKIP", "statusLine absent")
+            elif not isinstance(data["statusLine"], dict):
+                rec("claude:statusline", "FAIL",
+                    "statusLine is not a JSON object")
+            elif (data["statusLine"].get("type") == "command"
+                  and data["statusLine"].get("command")
+                  == claude_desired_command(ctx)):
+                rec("claude:statusline", "PASS", "expected command")
+            else:
+                rec("claude:statusline", "FAIL",
+                    "foreign or incomplete statusLine")
+        except Exception as e:
+            rec("claude:statusline", "FAIL", f"unreadable/malformed: {e}")
 
     # Codex TUI statusline
     p = ctx.codex_config_path
@@ -205,6 +239,15 @@ def run_doctor(ctx: Context, out=print) -> int:
                     rec(f"herdr:rows[{key}]", "PASS", "CEN-owned")
                 else:
                     rec(f"herdr:rows[{key}]", "FAIL", "foreign value")
+            if "claude" not in rows:
+                rec("herdr:rows[claude]", "SKIP", "absent")
+            elif rows["claude"] == CLAUDE_ROWS:
+                rec("herdr:rows[claude]", "PASS", "expected metadata shape")
+            elif rows["claude"] == CLAUDE_ROWS_STATE_ONLY:
+                rec("herdr:rows[claude]", "WARN",
+                    "compatible state-only shape; metadata rows not rendered")
+            else:
+                rec("herdr:rows[claude]", "FAIL", "foreign value")
         except Exception as e:
             rec("herdr:rows", "FAIL", f"TOML parse error: {e}")
 

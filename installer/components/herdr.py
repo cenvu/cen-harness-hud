@@ -59,6 +59,22 @@ OPENCODE_ROWS = [
     ["workspace", "tab"],
     ["agent", "state_text"],
 ]
+# Claude Code uses Herdr's native lifecycle detector. Keep the previous
+# generic state-only shape as an explicit compatibility shape: it predates
+# Claude metadata rows and must never be migrated or claimed.
+CLAUDE_ROWS_STATE_ONLY = [
+    ["workspace", "tab"],
+    ["agent", "state_text"],
+]
+# Desired CEN presentation. The values are published by the native Claude
+# StatusLine adapter; missing values are cleared there and render no false
+# placeholder in Herdr.
+CLAUDE_ROWS = [
+    ["workspace", "tab"],
+    ["agent", "state_text"],
+    [{"token": "$cen_claude_model_context", "bold": True}],
+    [{"token": "$cen_claude_quota", "bold": True}],
+]
 
 # desired TOML literal INNER lines (the wrapper `key = [` / `]` is added by
 # patching.insert_toml_key)
@@ -93,6 +109,16 @@ ROWS_LITERAL = {
     "opencode": [
         '  ["workspace", "tab"],',
         '  ["agent", "state_text"]',
+    ],
+    "claude": [
+        '  ["workspace", "tab"],',
+        '  ["agent", "state_text"],',
+        "  [",
+        '    { token = "$cen_claude_model_context", bold = true }',
+        "  ],",
+        "  [",
+        '    { token = "$cen_claude_quota", bold = true }',
+        "  ]",
     ],
 }
 ROWS_TABLE = ("ui", "sidebar", "agents", "rows_by_agent")
@@ -260,7 +286,7 @@ def plan(ctx) -> dict:
         )
 
     desired_values = {"agy": AGY_ROWS, "codex": CODEX_ROWS, "pi": PI_ROWS,
-                      "opencode": OPENCODE_ROWS}
+                      "opencode": OPENCODE_ROWS, "claude": CLAUDE_ROWS}
     node = parsed_ok
     for t in ROWS_TABLE:
         node = node.get(t) if isinstance(node, dict) else None
@@ -297,6 +323,19 @@ def plan(ctx) -> dict:
         status = patching.classify_toml_key(
             text, ROWS_TABLE, key, value
         )
+        if (key == "claude"
+                and patching.classify_toml_key(
+                    text, ROWS_TABLE, key, CLAUDE_ROWS_STATE_ONLY
+                ) == "equal"):
+            # Claude metadata rows have no public CEN predecessor. An exact
+            # generic state-only row is a user-compatible choice, not proof
+            # of CEN ownership; preserve it and leave metadata visually
+            # unused rather than overwriting user configuration.
+            notes.append(
+                "herdr rows[claude] compatible state-only shape — "
+                "left user-owned"
+            )
+            continue
         if status == "absent":
             if created:
                 notes.append("herdr rows created via new config.toml")
@@ -313,8 +352,16 @@ def plan(ctx) -> dict:
             })
             any_row_action = True
         elif status == "equal":
-            notes.append(f"herdr rows[{key}] already CEN-owned — no-op")
-            claims.append(_row_semantic(cfg_path, key, value, "adopt"))
+            if key == "claude":
+                # Claude has no prior CEN release shape. An exact match is
+                # compatible but ownership is unproven, so leave it outside
+                # the semantic manifest and preserve it on uninstall.
+                notes.append(
+                    "herdr rows[claude] already compatible — left user-owned"
+                )
+            else:
+                notes.append(f"herdr rows[{key}] already CEN-owned — no-op")
+                claims.append(_row_semantic(cfg_path, key, value, "adopt"))
         elif key == "codex":
             legacy_value = None
             if patching.classify_toml_key(

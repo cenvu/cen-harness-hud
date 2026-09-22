@@ -1,1 +1,1 @@
-"""Installer components: agy, codex, pi, herdr."""  # noqa: F401
+"""Installer components: agy, claude, codex, pi, herdr."""  # noqa: F401

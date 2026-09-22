@@ -8,6 +8,7 @@ change. No test touches the real HOME. No live-machine installer mutation.
 
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -29,6 +30,7 @@ SENTINELS = [
     ".local/bin/cen-hud",
     ".local/bin/cen-codex",
     ".local/bin/cen-codex-status",
+    ".claude/settings.json",
 ]
 
 CODEX_DESIRED = [
@@ -139,7 +141,8 @@ class Base(unittest.TestCase):
 
 class InstallTests(Base):
     def test_fresh_all_components(self):
-        r = self.install("--agy", "--codex", "--pi", "--herdr")
+        r = self.install("--agy", "--claude", "--codex", "--pi",
+                         "--herdr")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         root = os.path.join(self.home, ".local/share/cen-harness-hud",
                             _repo_version())
@@ -175,6 +178,11 @@ class InstallTests(Base):
         agy = json.loads(self.read(".gemini/antigravity-cli/settings.json"))
         self.assertIn("status.py", agy["statusLine"]["command"])
         self.assertNotIn(REPO, agy["statusLine"]["command"])
+        claude = json.loads(self.read(".claude/settings.json"))
+        self.assertEqual(claude["statusLine"]["type"], "command")
+        self.assertIn("integrations/claude/status.py",
+                      claude["statusLine"]["command"])
+        self.assertNotIn(REPO, claude["statusLine"]["command"])
         codex = tomllib.loads(self.read(".codex/config.toml"))
         self.assertEqual(codex["tui"]["status_line"], CODEX_DESIRED)
         self.assertTrue(os.path.islink(os.path.join(
@@ -188,6 +196,7 @@ class InstallTests(Base):
         self.assertEqual(len(rows["codex"]), 4)
         self.assertEqual(len(rows["pi"]), 3)
         self.assertEqual(len(rows["opencode"]), 2)
+        self.assertEqual(len(rows["claude"]), 4)
  # AGY/Pi rows unchanged; Codex card is compact weekly-only
         self.assertEqual(
             rows["codex"],
@@ -223,6 +232,15 @@ class InstallTests(Base):
                 ["agent", "state_text"],
             ],
         )
+        self.assertEqual(
+            rows["claude"],
+            [
+                ["workspace", "tab"],
+                ["agent", "state_text"],
+                [{"token": "$cen_claude_model_context", "bold": True}],
+                [{"token": "$cen_claude_quota", "bold": True}],
+            ],
+        )
         man = self.assertPrivacy()
         self.assertModes()
         bdir = os.path.join(self.home,
@@ -237,6 +255,7 @@ class InstallTests(Base):
     def test_single_component_installs(self):
         for flags, probe in (
             (("--agy",), ".gemini/antigravity-cli/settings.json"),
+            (("--claude",), ".claude/settings.json"),
             (("--codex",), ".codex/config.toml"),
             (("--pi",), ".pi/agent/extensions/deepseek-balance.ts"),
             (("--herdr",), ".config/herdr/plugins.json"),
@@ -370,6 +389,438 @@ class ConflictAndMalformedTests(Base):
         self.assertIn("status.py", agy["statusLine"]["command"])
 
 
+class ClaudeInstallerTests(Base):
+    def settings_path(self):
+        return os.path.join(self.home, ".claude", "settings.json")
+
+    def desired(self):
+        from installer.components.claude import desired_command
+        from installer.paths import Context
+
+        return desired_command(Context(self.home, REPO))
+
+    def settings(self):
+        with open(self.settings_path()) as f:
+            return json.load(f)
+
+    def semantic_records(self):
+        return [r for r in self.read_manifest()["semantic_patches"]
+                if r["path"] == "~/.claude/settings.json"]
+
+    def doctor_line(self, stdout):
+        for line in stdout.splitlines():
+            if "claude:statusline" in line:
+                return line.strip()
+        return None
+
+    def test_absent_settings_creates_native_statusline_and_nested_records(self):
+        r = self.install("--claude")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(
+            self.settings(),
+            {"statusLine": {"type": "command", "command": self.desired()}},
+        )
+        records = self.semantic_records()
+        self.assertEqual(sorted(r["key"] for r in records),
+                         ["statusLine.command", "statusLine.type"])
+        for record in records:
+            self.assertEqual(record["op"], "JSON_KEY")
+            self.assertEqual(record["basis"], "insert")
+        self.assertEqual(self.read_manifest()["schema_version"], 2)
+
+    def test_existing_settings_and_statusline_siblings_are_preserved(self):
+        original = {
+            "theme": "dark",
+            "statusLine": {
+                "padding": 2,
+                "refreshInterval": 10,
+                "hideVimModeIndicator": True,
+                "futureField": {"keep": True},
+            },
+        }
+        self.write(".claude/settings.json", json.dumps(original))
+        self.assertEqual(self.install("--claude").returncode, 0)
+        after = self.settings()
+        self.assertEqual(after["theme"], "dark")
+        self.assertEqual(after["statusLine"]["padding"], 2)
+        self.assertEqual(after["statusLine"]["refreshInterval"], 10)
+        self.assertTrue(after["statusLine"]["hideVimModeIndicator"])
+        self.assertEqual(after["statusLine"]["futureField"], {"keep": True})
+        self.assertEqual(after["statusLine"]["type"], "command")
+        self.assertEqual(after["statusLine"]["command"], self.desired())
+
+    def test_existing_settings_without_statusline_gets_nested_config(self):
+        original = {"theme": "dark", "nested": {"keep": [1, 2]}}
+        self.write(".claude/settings.json", json.dumps(original))
+        self.assertEqual(self.install("--claude").returncode, 0)
+        after = self.settings()
+        self.assertEqual(after["theme"], "dark")
+        self.assertEqual(after["nested"], {"keep": [1, 2]})
+        self.assertEqual(after["statusLine"], {
+            "type": "command", "command": self.desired(),
+        })
+
+    def test_malformed_or_non_object_root_fails_closed(self):
+        for raw in ('{"statusLine": ', '[]', 'null'):
+            with self.subTest(raw=raw):
+                self.write(".claude/settings.json", raw)
+                r = self.install("--claude")
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn("CONFLICT", r.stdout)
+                self.assertEqual(self.read(".claude/settings.json"), raw)
+
+    def test_preexisting_type_command_missing_command_owns_command_only(self):
+        self.write(".claude/settings.json", json.dumps({
+            "statusLine": {"type": "command", "padding": 3},
+        }))
+        self.assertEqual(self.install("--claude").returncode, 0)
+        records = self.semantic_records()
+        self.assertEqual([r["key"] for r in records], ["statusLine.command"])
+        self.assertEqual(self.settings()["statusLine"]["command"],
+                         self.desired())
+        self.assertEqual(self.cli("uninstall").returncode, 0)
+        self.assertEqual(self.settings(), {
+            "statusLine": {"type": "command", "padding": 3},
+        })
+
+    def test_preexisting_empty_command_is_restored_on_uninstall(self):
+        self.write(".claude/settings.json", json.dumps({
+            "statusLine": {"type": "command", "command": ""},
+        }))
+        self.assertEqual(self.install("--claude").returncode, 0)
+        record = self.semantic_records()[0]
+        self.assertEqual(record["key"], "statusLine.command")
+        self.assertEqual(record["before"], {"state": "value", "value": ""})
+        self.assertEqual(self.cli("uninstall").returncode, 0)
+        self.assertEqual(self.settings()["statusLine"], {
+            "type": "command", "command": "",
+        })
+
+    def test_statusline_object_without_type_or_command_owns_both(self):
+        self.write(".claude/settings.json", json.dumps({
+            "theme": "dark", "statusLine": {"padding": 1},
+        }))
+        self.assertEqual(self.install("--claude").returncode, 0)
+        self.assertEqual(sorted(r["key"] for r in self.semantic_records()),
+                         ["statusLine.command", "statusLine.type"])
+        self.assertEqual(self.cli("uninstall").returncode, 0)
+        self.assertEqual(self.settings(), {
+            "theme": "dark", "statusLine": {"padding": 1},
+        })
+
+    def test_foreign_type_conflicts_without_mutation(self):
+        original = json.dumps({"statusLine": {"type": "url"}})
+        self.write(".claude/settings.json", original)
+        r = self.install("--claude")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("CONFLICT", r.stdout)
+        self.assertEqual(self.read(".claude/settings.json"), original)
+        self.assertFalse(os.path.exists(self.manifest_path()))
+        self.assertFalse(os.path.exists(
+            os.path.join(self.home, ".local/share/cen-harness-hud")))
+
+    def test_foreign_command_conflicts_without_mutation(self):
+        original = json.dumps({"statusLine": {"command": "my-status"}})
+        self.write(".claude/settings.json", original)
+        r = self.install("--claude")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("CONFLICT", r.stdout)
+        self.assertEqual(self.read(".claude/settings.json"), original)
+
+    def test_non_object_statusline_conflicts_without_mutation(self):
+        for value in ("user-status", [], None, 7, False):
+            with self.subTest(value=value):
+                raw = json.dumps({"keep": True, "statusLine": value})
+                self.write(".claude/settings.json", raw)
+                r = self.install("--claude")
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn("CONFLICT", r.stdout)
+                self.assertEqual(self.read(".claude/settings.json"), raw)
+
+    def test_exact_preexisting_command_is_compatible_but_not_claimed(self):
+        original = {"statusLine": {
+            "type": "command", "command": self.desired(), "padding": 4,
+        }}
+        self.write(".claude/settings.json", json.dumps(original))
+        self.assertEqual(self.install("--claude").returncode, 0)
+        self.assertEqual(self.semantic_records(), [])
+        self.assertEqual(self.cli("uninstall").returncode, 0)
+        self.assertEqual(self.settings(), original)
+
+    def test_exact_command_without_type_owns_type_only(self):
+        original = {"statusLine": {
+            "command": self.desired(), "padding": 4,
+        }}
+        self.write(".claude/settings.json", json.dumps(original))
+        self.assertEqual(self.install("--claude").returncode, 0)
+        records = self.semantic_records()
+        self.assertEqual([r["key"] for r in records], ["statusLine.type"])
+        self.assertEqual(self.cli("uninstall").returncode, 0)
+        self.assertEqual(self.settings(), original)
+
+    def test_created_settings_file_is_removed_when_untouched(self):
+        self.assertEqual(self.install("--claude").returncode, 0)
+        self.assertEqual(self.cli("uninstall").returncode, 0)
+        self.assertFalse(os.path.exists(self.settings_path()))
+        self.assertFalse(os.path.isdir(os.path.join(self.home, ".claude")))
+
+    def test_created_settings_file_preserves_later_user_content(self):
+        self.assertEqual(self.install("--claude").returncode, 0)
+        data = self.settings()
+        data["theme"] = "dark"
+        with open(self.settings_path(), "w") as f:
+            json.dump(data, f)
+        self.assertEqual(self.cli("uninstall").returncode, 0)
+        self.assertEqual(self.settings(), {"theme": "dark"})
+
+    def test_owned_command_drift_is_preserved_and_evidence_retained(self):
+        self.assertEqual(self.install("--claude").returncode, 0)
+        data = self.settings()
+        data["statusLine"]["command"] = "user-status"
+        with open(self.settings_path(), "w") as f:
+            json.dump(data, f)
+        r = self.cli("uninstall")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("DRIFT", r.stdout)
+        after = self.settings()
+        self.assertEqual(after["statusLine"]["command"], "user-status")
+        self.assertNotIn("type", after["statusLine"])
+        self.assertFalse(os.path.exists(self.manifest_path()))
+        self.assertTrue(os.path.isdir(os.path.join(
+            self.home, ".config/cen-harness-hud/drift-archive")))
+
+    def test_same_attempt_failure_restores_settings_bytes_and_mode(self):
+        import unittest.mock
+        from installer import transaction as txn
+        from installer.paths import Context, ComponentError
+
+        original = '{"theme":"dark","statusLine":{"padding":2}}\n'
+        path = self.write(".claude/settings.json", original, mode=0o640)
+        ctx = Context(self.home, REPO)
+        with unittest.mock.patch.object(
+                txn, "_verify_action", side_effect=ComponentError("induced")):
+            rc = txn.run_install(ctx, [("claude", True)], out=lambda *_: None)
+        self.assertEqual(rc, 1)
+        with open(path) as f:
+            self.assertEqual(f.read(), original)
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o640)
+        self.assertFalse(os.path.exists(self.manifest_path()))
+
+    def test_whole_run_conflict_prevents_other_component_mutation(self):
+        original = json.dumps({"statusLine": {"command": "foreign"}})
+        self.write(".claude/settings.json", original)
+        r = self.install("--claude", "--agy")
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self.read(".claude/settings.json"), original)
+        self.assertFalse(os.path.exists(
+            os.path.join(self.home, ".gemini")))
+        self.assertFalse(os.path.exists(self.manifest_path()))
+
+    def test_doctor_absent_exact_foreign_and_malformed(self):
+        r = self.cli("doctor")
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(self.doctor_line(r.stdout).startswith("SKIP"))
+
+        self.write(".claude/settings.json", json.dumps({
+            "statusLine": {"type": "command", "command": self.desired()},
+        }))
+        r = self.cli("doctor")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("expected command", self.doctor_line(r.stdout))
+
+        self.write(".claude/settings.json", '{"statusLine":{"command":"x"}}')
+        r = self.cli("doctor")
+        self.assertEqual(r.returncode, 1)
+        self.assertTrue(self.doctor_line(r.stdout).startswith("FAIL"))
+
+        bad = '{"statusLine": '
+        self.write(".claude/settings.json", bad)
+        r = self.cli("doctor")
+        self.assertEqual(r.returncode, 1)
+        self.assertTrue(self.doctor_line(r.stdout).startswith("FAIL"))
+
+    def test_default_selection_auto_selects_detected_claude_only(self):
+        from installer import transaction as txn
+        from installer.paths import Context
+
+        ctx = Context(self.home, REPO)
+        detected = {"agy": None, "claude": "/synthetic/claude",
+                    "codex": None, "pi": None, "herdr": None}
+        selections = [(name, False) for name in
+                      ("agy", "claude", "codex", "pi", "herdr")]
+        with unittest.mock.patch.object(txn, "_detect",
+                                        return_value=detected):
+            self.assertEqual(txn.run_install(ctx, selections,
+                                             out=lambda *_: None), 0)
+        self.assertTrue(os.path.exists(self.settings_path()))
+        self.assertEqual(txn.run_uninstall(ctx, out=lambda *_: None), 0)
+
+    def test_repeated_install_uninstall_leaves_no_statusline_residue(self):
+        for _ in range(2):
+            self.assertEqual(self.install("--claude").returncode, 0)
+            self.assertEqual(self.cli("uninstall").returncode, 0)
+        self.assertFalse(os.path.exists(self.settings_path()))
+
+    def test_installed_statusline_command_runs_normal_and_provider_safe(self):
+        self.assertEqual(self.install("--claude").returncode, 0)
+        command = shlex.split(self.settings()["statusLine"]["command"])
+        status_path = command[1]
+        payload = json.dumps({
+            "model": {"display_name": "Sonnet"},
+            "context_window": {"remaining_percentage": 71},
+            "rate_limits": {
+                "five_hour": {"used_percentage": 25,
+                               "resets_at": 4102444800},
+                "seven_day": {"used_percentage": 40,
+                               "resets_at": 4102444800},
+            },
+        })
+        env = dict(os.environ)
+        env["HOME"] = self.home
+        env.pop("HERDR_PANE_ID", None)
+        normal = subprocess.run(
+            [sys.executable, status_path], input=payload,
+            env=env, capture_output=True, text=True)
+        self.assertEqual(normal.returncode, 0, normal.stderr)
+        self.assertIn("Sonnet", normal.stdout)
+        self.assertIn("CTX 71%", normal.stdout)
+        self.assertIn("5H 75%", normal.stdout)
+        self.assertIn("7D 60%", normal.stdout)
+
+        env["ANTHROPIC_BASE_URL"] = "synthetic-provider"
+        custom = subprocess.run(
+            [sys.executable, status_path], input=payload,
+            env=env, capture_output=True, text=True)
+        self.assertEqual(custom.returncode, 0, custom.stderr)
+        self.assertIn("Sonnet", custom.stdout)
+        self.assertIn("CTX 71%", custom.stdout)
+        self.assertNotIn("5H", custom.stdout)
+        self.assertNotIn("7D", custom.stdout)
+
+
+class ClaudePermissionTests(Base):
+    def claude_dir(self):
+        return os.path.join(self.home, ".claude")
+
+    def settings_path(self):
+        return os.path.join(self.claude_dir(), "settings.json")
+
+    def mode(self, path):
+        return stat.S_IMODE(os.stat(path).st_mode)
+
+    def test_preexisting_claude_dir_modes_are_never_normalized(self):
+        for wanted in (0o700, 0o750, 0o755):
+            with self.subTest(mode=oct(wanted)):
+                os.makedirs(self.claude_dir(), exist_ok=True)
+                os.chmod(self.claude_dir(), wanted)
+                self.assertEqual(self.install("--claude").returncode, 0)
+                self.assertEqual(self.mode(self.claude_dir()), wanted)
+                self.assertEqual(self.mode(self.settings_path()), 0o600)
+                self.assertEqual(self.cli("uninstall").returncode, 0)
+                self.assertTrue(os.path.isdir(self.claude_dir()))
+                self.assertEqual(self.mode(self.claude_dir()), wanted)
+                self.assertFalse(os.path.exists(self.settings_path()))
+
+    def test_cen_created_claude_dir_and_settings_use_private_modes(self):
+        self.assertFalse(os.path.lexists(self.claude_dir()))
+        self.assertEqual(self.install("--claude").returncode, 0)
+        self.assertEqual(self.mode(self.claude_dir()), 0o700)
+        self.assertEqual(self.mode(self.settings_path()), 0o600)
+        self.assertEqual(self.cli("uninstall").returncode, 0)
+        self.assertFalse(os.path.lexists(self.claude_dir()))
+
+    def test_preexisting_settings_modes_are_preserved(self):
+        os.makedirs(self.claude_dir())
+        for wanted in (0o600, 0o640, 0o644):
+            with self.subTest(mode=oct(wanted)):
+                self.write(".claude/settings.json", '{"theme":"dark"}\n',
+                           mode=wanted)
+                self.assertEqual(self.install("--claude").returncode, 0)
+                self.assertEqual(self.mode(self.settings_path()), wanted)
+                self.assertEqual(self.cli("uninstall").returncode, 0)
+                self.assertEqual(self.mode(self.settings_path()), wanted)
+
+    def test_foreign_non_directory_claude_root_fails_closed(self):
+        path = self.write(".claude", "foreign-root", mode=0o640)
+        r = self.install("--claude")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("CONFLICT", r.stdout)
+        with open(path) as f:
+            self.assertEqual(f.read(), "foreign-root")
+        self.assertEqual(self.mode(path), 0o640)
+        self.assertFalse(os.path.exists(self.manifest_path()))
+        self.assertFalse(os.path.exists(self.settings_path()))
+
+    def test_directory_symlink_is_not_chmodded_or_removed(self):
+        target = os.path.join(self.base, "claude-target")
+        os.makedirs(target)
+        os.chmod(target, 0o700)
+        os.symlink(target, self.claude_dir())
+        self.assertEqual(self.install("--claude").returncode, 0)
+        self.assertTrue(os.path.islink(self.claude_dir()))
+        self.assertEqual(self.mode(target), 0o700)
+        self.assertEqual(self.mode(self.settings_path()), 0o600)
+        self.assertEqual(self.cli("uninstall").returncode, 0)
+        self.assertTrue(os.path.islink(self.claude_dir()))
+        self.assertTrue(os.path.isdir(target))
+        self.assertEqual(self.mode(target), 0o700)
+        self.assertFalse(os.path.exists(self.settings_path()))
+
+    def test_created_claude_dir_with_user_file_is_preserved(self):
+        self.assertEqual(self.install("--claude").returncode, 0)
+        user_file = os.path.join(self.claude_dir(), "user-note.txt")
+        with open(user_file, "w") as f:
+            f.write("synthetic user content\n")
+        self.assertEqual(self.cli("uninstall").returncode, 0)
+        self.assertTrue(os.path.isfile(user_file))
+        self.assertTrue(os.path.isdir(self.claude_dir()))
+        self.assertEqual(self.mode(self.claude_dir()), 0o700)
+        self.assertFalse(os.path.exists(self.settings_path()))
+
+    def test_created_settings_with_user_json_keeps_private_mode(self):
+        self.assertEqual(self.install("--claude").returncode, 0)
+        with open(self.settings_path()) as f:
+            data = json.load(f)
+        data["theme"] = "dark"
+        with open(self.settings_path(), "w") as f:
+            json.dump(data, f)
+        self.assertEqual(self.cli("uninstall").returncode, 0)
+        with open(self.settings_path()) as f:
+            self.assertEqual(json.load(f), {"theme": "dark"})
+        self.assertEqual(self.mode(self.settings_path()), 0o600)
+
+    def test_rollback_preserves_preexisting_claude_dir_mode(self):
+        import unittest.mock
+        from installer import transaction as txn
+        from installer.paths import ComponentError, Context
+
+        os.makedirs(self.claude_dir())
+        os.chmod(self.claude_dir(), 0o700)
+        ctx = Context(self.home, REPO)
+        with unittest.mock.patch.object(
+                txn, "_verify_action", side_effect=ComponentError("induced")):
+            rc = txn.run_install(ctx, [("claude", True)], out=lambda *_: None)
+        self.assertEqual(rc, 1)
+        self.assertTrue(os.path.isdir(self.claude_dir()))
+        self.assertEqual(self.mode(self.claude_dir()), 0o700)
+        self.assertFalse(os.path.exists(self.settings_path()))
+        self.assertFalse(os.path.exists(self.manifest_path()))
+
+    def test_rollback_removes_new_claude_dir_and_settings(self):
+        import unittest.mock
+        from installer import transaction as txn
+        from installer.paths import ComponentError, Context
+
+        ctx = Context(self.home, REPO)
+        with unittest.mock.patch.object(
+                txn, "_verify_action", side_effect=ComponentError("induced")):
+            rc = txn.run_install(ctx, [("claude", True)], out=lambda *_: None)
+        self.assertEqual(rc, 1)
+        self.assertFalse(os.path.lexists(self.claude_dir()))
+        self.assertFalse(os.path.exists(self.settings_path()))
+        self.assertFalse(os.path.exists(self.manifest_path()))
+
+
 class HerdrConflictTests(Base):
     ROWS_TABLE = "[ui.sidebar.agents.rows_by_agent]\n"
 
@@ -495,13 +946,19 @@ class OpenCodeRowTests(Base):
         parsed = tomllib.loads(text)
         rows = parsed["ui"]["sidebar"]["agents"]["rows_by_agent"]
         self.assertEqual(rows["opencode"], self.OPENCODE)
- # unrelated config preserved byte-for-byte except the inserted block
+        # unrelated config preserved byte-for-byte except the inserted block
         after = text.encode()
         self.assertEqual(
             hashlib.sha256(
                 after.replace(
                     b'opencode = [\n  ["workspace", "tab"],\n'
-                    b'  ["agent", "state_text"]\n]\n', b"")).hexdigest(),
+                    b'  ["agent", "state_text"]\n]\n', b"").replace(
+                    b'claude = [\n  ["workspace", "tab"],\n'
+                    b'  ["agent", "state_text"],\n'
+                    b'  [\n    { token = "$cen_claude_model_context", bold = true }\n'
+                    b'  ],\n'
+                    b'  [\n    { token = "$cen_claude_quota", bold = true }\n'
+                    b'  ]\n]\n', b"")).hexdigest(),
             hashlib.sha256(before).hexdigest())
  # explicit semantic preservation
         self.assertEqual(parsed["ui"]["sidebar"]["agents"]["row_gap"], 2)
@@ -625,6 +1082,298 @@ class OpenCodeRowTests(Base):
             self.assertEqual(f.read(), original)
         self.assertEqual(stat.S_IMODE(os.stat(cfg_path).st_mode), 0o640)
         self.assertFalse(os.path.exists(self.manifest_path()))
+
+
+class ClaudeRowTests(Base):
+    """Herdr-native Claude state plus the StatusLine metadata presentation."""
+
+    ROWS_TABLE = "[ui.sidebar.agents.rows_by_agent]\n"
+    CLAUDE_STATE_ONLY = [
+        ["workspace", "tab"],
+        ["agent", "state_text"],
+    ]
+    CLAUDE = [
+        ["workspace", "tab"],
+        ["agent", "state_text"],
+        [{"token": "$cen_claude_model_context", "bold": True}],
+        [{"token": "$cen_claude_quota", "bold": True}],
+    ]
+    CLAUDE_STATE_ONLY_TOML = (
+        'claude = [\n  ["workspace", "tab"],\n'
+        '  ["agent", "state_text"]\n]\n'
+    )
+    CLAUDE_TOML = (
+        'claude = [\n  ["workspace", "tab"],\n'
+        '  ["agent", "state_text"],\n'
+        '  [\n    { token = "$cen_claude_model_context", bold = true }\n'
+        '  ],\n'
+        '  [\n    { token = "$cen_claude_quota", bold = true }\n'
+        '  ]\n]\n'
+    )
+    AGY_TOML = (
+        'agy = [\n  ["workspace", "tab"],\n'
+        '  ["agent", "state_text"],\n'
+        '  [{ token = "$cen_agy_identity", bold = true }],\n'
+        '  [{ token = "$cen_agy_quota", bold = true }]\n]\n'
+    )
+    CODEX_TOML = (
+        'codex = [\n  ["workspace", "tab"],\n'
+        '  ["agent", "state_text"],\n'
+        '  [{ token = "$cen_codex_identity", bold = true }],\n'
+        '  [{ token = "$cen_codex_weekly", bold = true }]\n]\n'
+    )
+    PI_TOML = (
+        'pi = [\n  ["workspace", "tab"],\n'
+        '  ["agent", "state_text"],\n'
+        '  [{ token = "$cen_ds_balance", fg = "#6fb5b7", bold = true }]\n]\n'
+    )
+    OPENCODE_TOML = (
+        'opencode = [\n  ["workspace", "tab"],\n'
+        '  ["agent", "state_text"]\n]\n'
+    )
+
+    def _rows(self):
+        return tomllib.loads(self.read(
+            ".config/herdr/config.toml")
+        )["ui"]["sidebar"]["agents"]["rows_by_agent"]
+
+    def _doctor_row_line(self, stdout):
+        for line in stdout.splitlines():
+            if "herdr:rows[claude]" in line:
+                return line.strip()
+        return None
+
+    def _config_with(self, claude_toml=""):
+        return self.write(
+            ".config/herdr/config.toml",
+            "# user header\n"
+            '[ui.sidebar]\ncustom_note = "keep me"\n'
+            '[ui.sidebar.agents]\nrow_gap = 2\n'
+            + self.ROWS_TABLE + claude_toml,
+        )
+
+    def test_fresh_config_includes_exact_four_row_claude(self):
+        r = self.install("--herdr")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self._rows()["claude"], self.CLAUDE)
+        self.assertEqual(len(self._rows()["claude"]), 4)
+        tokens = {
+            entry["token"]
+            for row in self._rows()["claude"][2:]
+            for entry in row
+        }
+        self.assertEqual(tokens, {
+            "$cen_claude_model_context", "$cen_claude_quota",
+        })
+
+    def test_existing_unrelated_rows_and_config_preserved(self):
+        self._config_with('custom_agent = [["keep"]]\n')
+        r = self.install("--herdr")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        parsed = tomllib.loads(self.read(".config/herdr/config.toml"))
+        rows = parsed["ui"]["sidebar"]["agents"]["rows_by_agent"]
+        self.assertEqual(rows["custom_agent"], [["keep"]])
+        self.assertEqual(parsed["ui"]["sidebar"]["agents"]["row_gap"], 2)
+        self.assertEqual(parsed["ui"]["sidebar"]["custom_note"], "keep me")
+
+    def test_exact_preexisting_four_row_claude_compatible_not_claimed(self):
+        self._config_with(self.CLAUDE_TOML)
+        r = self.install("--herdr")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("rows[claude] already compatible — left user-owned",
+                      r.stdout)
+        self.assertEqual(self._rows()["claude"], self.CLAUDE)
+        self.assertEqual(list(self._rows()).count("claude"), 1)
+        claims = [record for record in self.read_manifest()["semantic_patches"]
+                  if record["key"] == "claude"]
+        self.assertEqual(claims, [])
+        r = self.cli("uninstall")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self._rows()["claude"], self.CLAUDE)
+
+    def test_exact_preexisting_two_row_claude_is_compatible_not_migrated(self):
+        cfg_path = self._config_with(self.CLAUDE_STATE_ONLY_TOML)
+        before_rows = self.CLAUDE_STATE_ONLY
+        r = self.install("--herdr")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(
+            "rows[claude] compatible state-only shape — left user-owned",
+            r.stdout,
+        )
+        self.assertEqual(self._rows()["claude"], before_rows)
+        claims = [record for record in self.read_manifest()["semantic_patches"]
+                  if record["key"] == "claude"]
+        self.assertEqual(claims, [])
+        with open(cfg_path, "rb") as f:
+            installed = f.read()
+        self.assertIn(self.CLAUDE_STATE_ONLY_TOML.encode(), installed)
+        self.assertNotIn(b"$cen_claude_", installed)
+        r = self.cli("uninstall")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self._rows()["claude"], before_rows)
+        print("STATE_ONLY_COMPAT_PRESERVED=YES")
+
+    def test_foreign_claude_rows_conflict_without_mutation(self):
+        cfg_path = self._config_with('claude = [["foreign"]]\n')
+        with open(cfg_path, "rb") as f:
+            before = f.read()
+        r = self.install("--herdr")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("CONFLICT", r.stdout)
+        self.assertIn("claude", r.stdout)
+        with open(cfg_path, "rb") as f:
+            self.assertEqual(f.read(), before)
+
+    def test_foreign_claude_near_match_conflicts_without_mutation(self):
+        foreign = (
+            'claude = [\n  ["workspace", "tab"],\n'
+            '  ["agent", "state_text"],\n'
+            '  [{ token = "$cen_claude_model_context", bold = true }],\n'
+            '  [{ token = "$user_claude_quota", bold = true }]\n]\n'
+        )
+        cfg_path = self._config_with(foreign)
+        with open(cfg_path, "rb") as f:
+            before = f.read()
+        r = self.install("--herdr")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("CONFLICT", r.stdout)
+        with open(cfg_path, "rb") as f:
+            self.assertEqual(f.read(), before)
+
+    def test_foreign_claude_conflict_aborts_whole_install(self):
+        cfg_path = self._config_with('claude = [["foreign"]]\n')
+        with open(cfg_path, "rb") as f:
+            before = f.read()
+        r = self.install("--agy", "--herdr")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("CONFLICT", r.stdout)
+        self.assertFalse(os.path.exists(self.manifest_path()))
+        self.assertFalse(os.path.exists(os.path.join(
+            self.home, ".local/share/cen-harness-hud")))
+        with open(cfg_path, "rb") as f:
+            self.assertEqual(f.read(), before)
+
+    def test_doctor_skips_absent_claude_rows(self):
+        self._config_with()
+        r = self.cli("doctor")
+        line = self._doctor_row_line(r.stdout)
+        self.assertIsNotNone(line, r.stdout)
+        self.assertTrue(line.startswith("SKIP"), line)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_doctor_passes_exact_claude_rows(self):
+        self._config_with(self.CLAUDE_TOML)
+        r = self.cli("doctor")
+        line = self._doctor_row_line(r.stdout)
+        self.assertIsNotNone(line, r.stdout)
+        self.assertTrue(line.startswith("PASS"), line)
+        self.assertIn("expected metadata shape", line)
+        self.assertNotIn("CEN-owned", line)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_doctor_warns_on_exact_two_row_state_only_claude(self):
+        self._config_with(self.CLAUDE_STATE_ONLY_TOML)
+        r = self.cli("doctor")
+        line = self._doctor_row_line(r.stdout)
+        self.assertIsNotNone(line, r.stdout)
+        self.assertTrue(line.startswith("WARN"), line)
+        self.assertIn("compatible state-only shape; metadata rows not rendered",
+                      line)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_doctor_fails_foreign_claude_rows(self):
+        self._config_with('claude = [["foreign"]]\n')
+        r = self.cli("doctor")
+        line = self._doctor_row_line(r.stdout)
+        self.assertIsNotNone(line, r.stdout)
+        self.assertTrue(line.startswith("FAIL"), line)
+        self.assertEqual(r.returncode, 1)
+
+    def test_clean_uninstall_removes_owned_claude_row(self):
+        self._config_with()
+        self.assertEqual(self.install("--herdr").returncode, 0)
+        r = self.cli("uninstall")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rows = tomllib.loads(self.read(
+            ".config/herdr/config.toml"))["ui"]["sidebar"]["agents"]
+        self.assertNotIn("claude", rows.get("rows_by_agent", {}))
+
+    def test_uninstall_preserves_unrelated_config(self):
+        self._config_with('custom_agent = [["keep"]]\n')
+        self.assertEqual(self.install("--herdr").returncode, 0)
+        self.assertEqual(self.cli("uninstall").returncode, 0)
+        parsed = tomllib.loads(self.read(".config/herdr/config.toml"))
+        self.assertEqual(parsed["ui"]["sidebar"]["custom_note"], "keep me")
+        self.assertEqual(parsed["ui"]["sidebar"]["agents"]["row_gap"], 2)
+        self.assertEqual(
+            parsed["ui"]["sidebar"]["agents"]["rows_by_agent"]["custom_agent"],
+            [["keep"]],
+        )
+        self.assertNotIn("claude", parsed["ui"]["sidebar"]["agents"]
+                         .get("rows_by_agent", {}))
+
+    def test_manifest_records_claude_as_schema_v2_toml_key(self):
+        self.assertEqual(self.install("--herdr").returncode, 0)
+        man = self.read_manifest()
+        self.assertEqual(man["schema_version"], 2)
+        records = [record for record in man["semantic_patches"]
+                   if record["key"] == "claude"]
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record["op"], "TOML_KEY")
+        self.assertEqual(record["table"],
+                         ["ui", "sidebar", "agents", "rows_by_agent"])
+        self.assertEqual(record["before"], {"state": "absent"})
+        self.assertEqual(record["format"], "toml")
+        self.assertEqual(record["key"], "claude")
+        self.assertEqual(record["basis"], "insert")
+        self.assertEqual(record["after"], self.CLAUDE)
+
+    def test_repeated_install_uninstall_leaves_zero_claude_residue(self):
+        self._config_with()
+        for _ in range(2):
+            self.assertEqual(self.install("--herdr").returncode, 0)
+            self.assertEqual(self.cli("uninstall").returncode, 0)
+        text = self.read(".config/herdr/config.toml")
+        rows = tomllib.loads(text).get("ui", {}).get("sidebar", {}).get(
+            "agents", {}).get("rows_by_agent", {})
+        self.assertNotIn("claude", rows)
+        self.assertNotIn("claude =", text)
+
+    def test_existing_agent_rows_remain_unchanged(self):
+        content = (self.ROWS_TABLE + self.AGY_TOML + self.CODEX_TOML
+                   + self.PI_TOML + self.OPENCODE_TOML)
+        self.write(".config/herdr/config.toml", content)
+        before = tomllib.loads(content)["ui"]["sidebar"]["agents"]
+        before_rows = before["rows_by_agent"]
+        r = self.install("--herdr")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rows = self._rows()
+        for key in ("agy", "codex", "pi", "opencode"):
+            self.assertEqual(rows[key], before_rows[key])
+        self.assertEqual(rows["claude"], self.CLAUDE)
+
+    def test_mixed_user_claude_and_inserted_rows_have_independent_ownership(self):
+        self._config_with(self.CLAUDE_TOML)
+        r = self.install("--herdr")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rows = self._rows()
+        self.assertEqual(rows["claude"], self.CLAUDE)
+        for key in ("agy", "codex", "pi", "opencode"):
+            self.assertIn(key, rows)
+        man = self.read_manifest()
+        claude_claims = [record for record in man["semantic_patches"]
+                         if record["key"] == "claude"]
+        self.assertEqual(claude_claims, [])
+        self.assertEqual(self.cli("uninstall").returncode, 0)
+        with open(os.path.join(self.home, ".config/herdr/config.toml"), "rb") as f:
+            after = tomllib.load(f)
+        after_rows = after["ui"]["sidebar"]["agents"]["rows_by_agent"]
+        self.assertEqual(after_rows["claude"], self.CLAUDE)
+        for key in ("agy", "codex", "pi", "opencode"):
+            self.assertNotIn(key, after_rows)
+        self.assertEqual(after["ui"]["sidebar"]["custom_note"], "keep me")
+        self.assertEqual(after["ui"]["sidebar"]["agents"]["row_gap"], 2)
 
 
 class TransactionTests(Base):
@@ -760,6 +1509,7 @@ class HardeningTests(Base):
         self.assertEqual(len(rows["codex"]), 4)
         self.assertEqual(len(rows["pi"]), 3)
         self.assertEqual(len(rows["opencode"]), 2)
+        self.assertEqual(len(rows["claude"]), 4)
         man = self.read_manifest()
         herdr_records = [pf for pf in man["patched_files"]
                          if pf["path"].endswith("herdr/config.toml")]
@@ -1086,12 +1836,12 @@ class InstallerMigrationTests(Base):
         self.assertEqual(rows["codex"], self.CURRENT_CODEX_VALUE)
  # canonical legacy token fully gone; no extra bracket residue
  # (valid TOML proven by tomllib.loads above; exactly one bare "]"
- # closer per top-level row block: agy, codex, pi)
+ # closer per top-level row block: agy, codex, pi, opencode, claude)
         self.assertNotIn("$cen_codex_summary", text)
  # exactly one bare "]" closer per top-level row block: agy, codex, pi,
- # and the newly inserted opencode block
+ # and the newly inserted opencode and four-row claude block
         self.assertEqual(
-            sum(1 for ln in text.splitlines() if ln.strip() == "]"), 7)
+            sum(1 for ln in text.splitlines() if ln.strip() == "]"), 9)
  # 2./3./4. unrelated content byte-preserved
         self.assertEqual(rows["agy"][0], ["workspace", "tab"])
         self.assertEqual(len(rows["agy"]), 4)

@@ -39,6 +39,10 @@ class Context:
         return os.path.join(self.home, ".gemini", "antigravity-cli", "settings.json")
 
     @property
+    def claude_settings_path(self) -> str:
+        return os.path.join(self.home, ".claude", "settings.json")
+
+    @property
     def codex_config_path(self) -> str:
         return os.path.join(self.home, ".codex", "config.toml")
 
@@ -68,6 +72,10 @@ class Context:
     @property
     def agy_status_installed(self) -> str:
         return os.path.join(self.install_root, "integrations", "agy", "status.py")
+
+    @property
+    def claude_status_installed(self) -> str:
+        return os.path.join(self.install_root, "integrations", "claude", "status.py")
 
     @property
     def codex_launcher_installed(self) -> str:

@@ -7,6 +7,7 @@ import shutil
 def detect_harnesses() -> dict:
     return {
         "agy": shutil.which("agy"),
+        "claude": shutil.which("claude"),
         "codex": shutil.which("codex"),
         "pi": shutil.which("pi"),
         "herdr": shutil.which("herdr"),

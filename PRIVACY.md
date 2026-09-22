@@ -19,14 +19,29 @@ client — full disclosure below.
 | Codex profiles | one-way short profile tag mapped to its CODEX_HOME filesystem path | `~/.config/herdr/cen-harness-hud-quota/profiles/` (`0700` dir, `0600` files) |
 | Codex sessions | CODEX_HOME path plus schema/timing metadata, filename is a SHA-256-derived key from the native Codex session id (the raw session id is not used as the filename) | `~/.config/herdr/cen-harness-hud-quota/codex-sessions/` (`0700` dir, `0600` files) |
 | Codex snapshots | sanitized account local-part alias, plan tier, normalized quota remaining data, window duration, reset timestamp, fetched/attempt timing, stale flag — hash-keyed by session id | `~/.config/herdr/cen-harness-hud-quota/codex-snapshots/` (`0700` dir, `0600` files) |
+| Claude Code | Nothing persistent; StatusLine payload is processed in memory and Herdr metadata is transient | None |
 
 No full email address, no OAuth token, no API key, and no `auth.json`
 content is stored in any of the above. Quota snapshot metadata IS persisted
 locally as described; only money balances (PAYG cash amounts) are never
 stored.
 
-Only this persistent AGY/Codex state uses those disk permissions. The Pi
-balance integration persists nothing (see below).
+Only the persistent AGY/Codex state above uses those runtime-state disk
+permissions. The Claude adapter persists no runtime telemetry. The Pi balance
+integration persists nothing (see below).
+
+## Claude Code
+
+Persistent runtime telemetry: **NONE**.
+
+CEN HUD does not persist Claude session IDs, model or context, quota or reset
+data, identity, or plan. The StatusLine payload is processed in memory, and
+Herdr metadata is transient. Claude settings mutation is configuration
+ownership, not telemetry storage.
+
+If CEN creates `~/.claude/settings.json`, it uses mode `0600`. If the file
+already exists, its original mode is preserved. CEN does not cache Claude
+quota or reset data.
 
 ## PI EXCEPTION — outbound network with your existing key
 

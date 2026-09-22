@@ -34,6 +34,16 @@ CEN HUD runs entirely as your local user, with no elevated privileges and no
   your existing DeepSeek API key through the supported Pi/environment
   credential surface, uses it solely as Bearer auth for DeepSeek's official
   balance request, and does not persist, log or display the raw secret
+- the Claude adapter consumes one bounded structured StatusLine JSON object
+  from stdin, performs no direct provider network request, reads no
+  credential or token store, and optionally reports two metadata tokens over
+  the local Herdr Unix socket
+- Claude publication validates both the pane and native Claude session before
+  reporting; malformed or missing data fails open, and there is no background
+  worker, ticker, or poller
+- custom-provider routing is detected by the presence of
+  `ANTHROPIC_BASE_URL`; its endpoint value is never used as a CEN network
+  destination
 - external harnesses may perform their own network activity according to
   their own behavior and configuration — that activity belongs to those
   tools, not to CEN HUD
@@ -64,6 +74,11 @@ the same file are preserved and do not block a safe inverse.
 restored only when the whole file still matches the recorded post-install
 hash; on mismatch the manifest is retired to a private `0600` archive (with
 the retained backups) rather than left claiming an active install.
+
+Claude settings use nested schema-2 ownership for `statusLine.type` and
+`statusLine.command`. Foreign command or type values fail closed. The
+installer never claims the whole Claude settings object and never widens the
+mode of an existing `~/.claude` directory.
 
 ## Privacy at rest
 

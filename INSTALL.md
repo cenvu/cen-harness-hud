@@ -4,13 +4,14 @@
 
 - macOS (arm64 validated)
 - **Python 3 requirements:**
-  - `python3` 3.9+ is sufficient for the AGY and Pi components.
+  - `python3` 3.9+ is sufficient for the AGY, Claude, and Pi components.
   - **`python3` 3.11+ is REQUIRED when installing the Codex or Herdr
     components** — their config patching needs the stdlib `tomllib` module.
     On older Pythons those components refuse to run (fail-closed) rather than
     patch TOML blindly; `install.sh` prints a note when it detects this.
 - At least one supported harness installed and authenticated **by you**:
-  AGY (Antigravity CLI), Codex CLI, Pi Coding Agent, and/or Herdr.
+  AGY (Antigravity CLI), Claude Code, Codex CLI, Pi Coding Agent, and/or
+  Herdr.
   CEN HUD does not install, bundle, authenticate, or migrate any harness.
 
 ## OpenCode notes
@@ -26,6 +27,44 @@ OpenCode must already be installed (by you) if you want to use that card;
 CEN HUD does not install or authenticate OpenCode. The card shows only the
 lifecycle state that Herdr itself detects — CEN HUD publishes no OpenCode
 metadata of its own.
+
+## Claude Code notes
+
+Install Claude Code support explicitly:
+
+```sh
+./install.sh --claude
+```
+
+The all-component example is:
+
+```sh
+./install.sh --agy --claude --codex --pi --herdr
+```
+
+The Claude component writes only these nested surfaces in
+`~/.claude/settings.json`:
+
+- `statusLine.type`
+- `statusLine.command`
+
+These surfaces use schema-2 semantic ownership. First-generation ownership
+rules are fail-closed:
+
+- an absent surface is inserted and owned by CEN;
+- a compatible exact pre-existing command is preserved and remains
+  unclaimed;
+- a foreign command or type stops the install before mutation.
+
+Claude configuration privacy follows the existing modes. A newly created
+`~/.claude` directory is `0700`, and a newly created `settings.json` is
+`0600`. Existing directory and file modes are preserved. Unrelated settings
+and `statusLine` siblings are preserved.
+
+The Claude-only JSON path works without `tomllib` and without a
+Python-3.11-specific TOML parser. Codex and Herdr configuration still
+requires a Python version with `tomllib`; the all-component install therefore
+still requires Python 3.11+.
 
 ## Codex notes
 
@@ -49,7 +88,7 @@ proven.
 ```sh
 ./install.sh              # installs all detected components
 ./install.sh --agy        # or select components explicitly
-./install.sh --agy --codex --pi --herdr
+./install.sh --agy --claude --codex --pi --herdr
 ```
 
 The installer will:

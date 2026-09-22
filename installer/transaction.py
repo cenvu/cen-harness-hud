@@ -16,6 +16,7 @@ import stat
 from . import manifest as manifest_mod
 from . import patching
 from .components import agy as comp_agy
+from .components import claude as comp_claude
 from .components import codex as comp_codex
 from .components import herdr as comp_herdr
 from .components import pi as comp_pi
@@ -32,6 +33,7 @@ from .paths import (
 
 COMPONENTS = {
     "agy": comp_agy.plan,
+    "claude": comp_claude.plan,
     "codex": comp_codex.plan,
     "pi": comp_pi.plan,
     "herdr": comp_herdr.plan,
