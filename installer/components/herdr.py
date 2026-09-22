@@ -13,6 +13,7 @@ import json
 import os
 
 from .. import patching
+from .. import semantic as sem_mod
 from ..paths import ComponentError, ConflictError
 
 PLUGIN_ID = "cen-harness-hud-quota"
@@ -147,9 +148,35 @@ def _registration(ctx) -> dict:
     }
 
 
+def _row_semantic(cfg_path, key, value, basis):
+    return sem_mod.rec(cfg_path, "toml", "TOML_KEY", key, sem_mod.ABSENT,
+                       value, basis, table=ROWS_TABLE)
+
+
+def _reg_semantic(reg_path, reg, basis):
+    return sem_mod.rec(reg_path, "json", "JSON_LIST_ENTRY", PLUGIN_ID,
+                       sem_mod.ABSENT, reg, basis)
+
+
+def _is_proven_cen_registration(entry: dict, ctx) -> bool:
+    """Narrow proof that a plugins.json entry is an older CEN registration:
+    same plugin id plus manifest/plugin paths resolving inside the CEN
+    product share root. Foreign same-id entries fail closed."""
+    try:
+        manifest = os.path.realpath(entry.get("manifest_path") or "")
+        root = os.path.realpath(entry.get("plugin_root") or "")
+    except Exception:
+        return False
+    share = os.path.realpath(ctx.share_root)
+    if not manifest.startswith(share + os.sep):
+        return False
+    return root == share or root.startswith(share + os.sep)
+
+
 def plan(ctx) -> dict:
     actions = []
     notes = []
+    claims = []
 
     # 1. generated plugin manifest into install root
     actions.append({
@@ -172,6 +199,7 @@ def plan(ctx) -> dict:
             "type": "write_json_new",
             "path": reg_path,
             "data": [reg],
+            "semantic": _reg_semantic(reg_path, reg, "insert"),
         })
         notes.append("plugins.json absent — will be created CEN-owned")
     else:
@@ -188,10 +216,26 @@ def plan(ctx) -> dict:
                 "type": "patch_json", "path": reg_path,
                 "updates_list_append": {"entry": reg},
                 "backup_name": "plugins.json",
+                "semantic": _reg_semantic(reg_path, reg, "insert"),
             })
         elif len(mine) == 1 and mine[0].get("manifest_path") == \
                 ctx.generated_plugin_manifest:
             notes.append("plugins.json already CEN-owned — no-op")
+            claims.append(_reg_semantic(reg_path, reg, "adopt"))
+        elif (len(mine) == 1
+                and _is_proven_cen_registration(mine[0], ctx)):
+            notes.append("plugins.json holds a proven older CEN "
+                         "registration — will migrate in place")
+            desired = [e for e in data if not (
+                isinstance(e, dict) and e.get("plugin_id") == PLUGIN_ID)]
+            desired = desired + [reg]
+            actions.append({
+                "type": "patch_json_document", "path": reg_path,
+                "expected_current_data": data,
+                "desired_data": desired,
+                "backup_name": "plugins.json",
+                "semantic": _reg_semantic(reg_path, reg, "migrate"),
+            })
         else:
             raise ConflictError(
                 "herdr: plugins.json has foreign cen-harness-hud-quota entry; "
@@ -242,6 +286,10 @@ def plan(ctx) -> dict:
             "path": cfg_path,
             "text": "\n".join(lines) + "\n",
             "mode": 0o644,
+            "semantics": [
+                _row_semantic(cfg_path, key, value, "insert")
+                for key, value in desired_values.items()
+            ],
         })
 
     any_row_action = False
@@ -261,10 +309,12 @@ def plan(ctx) -> dict:
                 "literal_lines": ROWS_LITERAL[key],
                 "desired_value": value,
                 "backup_name": "herdr-config.toml",
+                "semantic": _row_semantic(cfg_path, key, value, "insert"),
             })
             any_row_action = True
         elif status == "equal":
             notes.append(f"herdr rows[{key}] already CEN-owned — no-op")
+            claims.append(_row_semantic(cfg_path, key, value, "adopt"))
         elif key == "codex":
             legacy_value = None
             if patching.classify_toml_key(
@@ -291,6 +341,7 @@ def plan(ctx) -> dict:
                 "literal_lines": ROWS_LITERAL[key],
                 "desired_value": value,
                 "backup_name": "herdr-config.toml",
+                "semantic": _row_semantic(cfg_path, key, value, "migrate"),
             })
             any_row_action = True
         else:
@@ -299,5 +350,5 @@ def plan(ctx) -> dict:
                 "overwrite"
             )
 
-    return {"component": "herdr", "actions": actions, "notes": notes,
-            "noop": False}
+    return {"component": "herdr", "actions": actions, "claims": claims,
+            "notes": notes, "noop": False}

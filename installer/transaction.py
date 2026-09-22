@@ -442,6 +442,8 @@ def run_install(ctx: Context, selections: list, out=print) -> int:
             skipped=skipped,
             journal_records=[r for r in journal if r["type"] != "patched"],
             patched_files=patched_records,
+            semantic_patches=_collect_semantics(ctx, plans,
+                                               all_planned_actions),
         )
         manifest_mod.save_atomic_0600(ctx, man)
 
@@ -477,6 +479,40 @@ def _warn_path(ctx, out) -> None:
             '  export PATH="$HOME/.local/bin:$PATH"')
 
 
+# ── Semantic ownership collection (schema v2) ─────────────────────────────────
+
+def _collect_semantics(ctx, plans: list, actions: list) -> list:
+    """Gather per-surface ownership facts for the schema-v2 manifest.
+
+    Sources, in deterministic plan order:
+    - action["semantic"]: mutation actions (insert/migrate) on owned surfaces
+    - action["semantics"]: write actions covering several owned surfaces
+      (e.g. fresh config files)
+    - plan["claims"]: adoption claims (no write needed, ownership proven)
+    Action paths are absolute; stored HOME-relative. created_file is True
+    exactly for write_*_new actions (fired only when the path was absent).
+    """
+    records = []
+    for act in actions:
+        sems = []
+        if act.get("semantic"):
+            sems.append(act["semantic"])
+        sems.extend(act.get("semantics", []))
+        created = act["type"] in ("write_json_new", "write_text_new")
+        for sem in sems:
+            rec = dict(sem)
+            rec["path"] = home_rel(act["path"], ctx)
+            rec["created_file"] = created
+            records.append(rec)
+    for p in plans:
+        for claim in p.get("claims", []):
+            rec = dict(claim)
+            rec["path"] = home_rel(claim["path"], ctx)
+            rec["created_file"] = False
+            records.append(rec)
+    return records
+
+
 # ── Uninstall ─────────────────────────────────────────────────────────────────
 
 def run_uninstall(ctx: Context, out=print) -> int:
@@ -484,6 +520,17 @@ def run_uninstall(ctx: Context, out=print) -> int:
         out("NO_MANIFEST: nothing to uninstall.")
         return 0
     man = manifest_mod.load(ctx)
+    schema = man.get("schema_version", 1)
+    if schema == 2:
+        return _uninstall_schema2(ctx, man, out)
+    if schema == 1:
+        return _uninstall_schema1(ctx, man, out)
+    out("UNSUPPORTED_MANIFEST_SCHEMA: schema_version %r is not 1 or 2; "
+        "refusing destructive uninstall (fail-closed)." % (schema,))
+    return 1
+
+
+def _uninstall_schema1(ctx: Context, man: dict, out=print) -> int:
     drift = False
 
     for pf in man.get("patched_files", []):
@@ -503,6 +550,84 @@ def run_uninstall(ctx: Context, out=print) -> int:
             out(f"  DRIFT (user-edited after install) — NOT overwriting: "
                 f"{pf['path']}\n    backup kept at {pf['backup']}")
 
+    return _uninstall_shared_tail(ctx, man, out, drift)
+
+
+# ── Schema-2 semantic uninstall ───────────────────────────────────────────────
+
+def _semantic_record_paths(man: dict) -> set:
+    return {r.get("path") for r in man.get("semantic_patches", [])
+            if isinstance(r, dict) and r.get("path")}
+
+
+def _uninstall_semantic_path(ctx, man: dict, out=print) -> bool:
+    """Apply per-surface inverses. Returns True when owned-surface drift
+    (or a surgical failure) requires manifest retirement."""
+    from . import semantic as sem_mod
+
+    drift = False
+    records = [r for r in man.get("semantic_patches", [])
+               if isinstance(r, dict)]
+    resolved_containers: dict = {}
+    by_path: dict = {}
+    for rec in records:
+        by_path.setdefault(rec.get("path"), []).append(rec)
+
+    for rel, recs in sorted(by_path.items()):
+        path = paths_expand(rel, ctx)
+        if not os.path.lexists(path):
+            continue # surface already gone with its file — clean
+        for rec in recs:
+            live = dict(rec)
+            live["path"] = path
+            try:
+                verdict = sem_mod.classify_record(live)
+            except Exception:
+                verdict = "drift"
+            if verdict == "clean":
+                resolved_containers.setdefault(rel, []).extend(
+                    live.get("containers", []))
+                continue
+            if verdict == "drift":
+                drift = True
+                out(f"  SEMANTIC-DRIFT owned surface changed after install — "
+                    f"NOT overwriting: {rel} [{rec.get('op')}:{rec.get('key')}]")
+                continue
+            try:
+                sem_mod.apply_inverse(live)
+                resolved_containers.setdefault(rel, []).extend(
+                    live.get("containers", []))
+                out(f"  semantic-inversed: {rel} [{rec.get('op')}:"
+                    f"{rec.get('key')}]")
+            except Exception as e:
+                drift = True
+                out(f"  SEMANTIC-DRIFT inverse failed — NOT overwriting: "
+                    f"{rel} [{rec.get('key')}] ({e})")
+
+    # CEN-created files: delete only when no user content survives.
+    # Only containers of RESOLVED records may prune: a drifted surface's
+    # container holds user edits and must never be pruned away.
+    created = {}
+    for rec in records:
+        if rec.get("created_file"):
+            created.setdefault(rec.get("path"), []).append(rec)
+    for rel, recs in sorted(created.items()):
+        path = paths_expand(rel, ctx)
+        if not os.path.lexists(path):
+            continue
+        containers = resolved_containers.get(rel, [])
+        try:
+            if not sem_mod.file_has_user_content(path, containers):
+                os.unlink(path)
+                out(f"  removed CEN-created file with no user content: {rel}")
+        except OSError:
+            pass
+    return drift
+
+
+def _uninstall_shared_tail(ctx, man: dict, out, drift: bool,
+                           skip_created: set = frozenset(),
+                           semantic: bool = False) -> int:
     for sl in reversed(man.get("created_symlinks", [])):
         link = paths_expand(sl["link"], ctx)
         target = paths_expand(sl["target"], ctx)
@@ -514,6 +639,9 @@ def run_uninstall(ctx: Context, out=print) -> int:
             out(f"  DRIFT link left in place: {sl['link']}")
 
     for cf in man.get("created_files", []):
+        cpath = cf if isinstance(cf, str) else cf.get("path")
+        if cpath in skip_created:
+            continue # schema-2 semantic phase already decided this file
         if isinstance(cf, str): # legacy schema
             p, sha = paths_expand(cf, ctx), None
         else:
@@ -542,8 +670,6 @@ def run_uninstall(ctx: Context, out=print) -> int:
         os.rmdir(ctx.share_root)
 
     if drift:
- # Retire the manifest: drift evidence must survive, but the ACTIVE
- # manifest path must no longer falsely claim the product is installed.
         archive_dir = os.path.join(ctx.state_root, "drift-archive")
         install_id = man.get("install_id") or "undated"
         dest_dir = os.path.join(archive_dir, install_id)
@@ -559,17 +685,19 @@ def run_uninstall(ctx: Context, out=print) -> int:
         os.chmod(os.path.join(dest_dir, "install-manifest.json"), 0o600)
         os.chmod(dest_dir, 0o700)
         os.chmod(archive_dir, 0o700)
-        out("UNINSTALL_COMPLETE_WITH_DRIFT — user-edited files preserved; "
-            "drift evidence archived (manifest retired) under "
-            "~/.config/cen-harness-hud/drift-archive/%s/ ; backups retained "
-            "under ~/.config/cen-harness-hud/backups/"
-            % os.path.basename(dest_dir))
+        msg = ("UNINSTALL_COMPLETE_WITH_DRIFT — user-edited files preserved; "
+               "drift evidence archived (manifest retired) under "
+               "~/.config/cen-harness-hud/drift-archive/%s/ ; backups "
+               "retained under ~/.config/cen-harness-hud/backups/"
+               % os.path.basename(dest_dir))
+        if semantic:
+            msg += (" ; semantic inverse may already have resolved "
+                    "unchanged owned surfaces")
+        out(msg)
         return 0
 
     if os.path.isfile(ctx.manifest_path):
         os.unlink(ctx.manifest_path)
- # remove ONLY this install's own backups; never touch backup dirs
- # belonging to prior drift archives (archived manifests reference them)
     install_id = man.get("install_id")
     if install_id:
         current_backup_dir = os.path.join(ctx.backups_root, install_id)
@@ -585,6 +713,36 @@ def run_uninstall(ctx: Context, out=print) -> int:
         "~/.config/herdr/cen-harness-hud-quota/ was NOT deleted; remove "
         "manually if desired.")
     return 0
+
+
+def _uninstall_schema2(ctx, man: dict, out=print) -> int:
+    drift = _uninstall_semantic_path(ctx, man, out)
+
+    # Whole-file restore ONLY for patched paths with no semantic record
+    # (defensive fallback; current components record every patch).
+    covered = _semantic_record_paths(man)
+    for pf in man.get("patched_files", []):
+        if pf.get("path") in covered:
+            continue
+        path = paths_expand(pf["path"], ctx)
+        backup = paths_expand(pf["backup"], ctx)
+        if not os.path.exists(path):
+            out(f"  gone: {pf['path']}")
+            continue
+        cur = sha256_file(path)
+        if cur == pf.get("after_sha256"):
+            with open(backup, "rb") as f:
+                data = f.read()
+            atomic_write(path, data, int(pf["original_mode"], 8))
+            out(f"  restored: {pf['path']}")
+        else:
+            drift = True
+            out(f"  DRIFT (user-edited after install) — NOT overwriting: "
+                f"{pf['path']}\n    backup kept at {pf['backup']}")
+
+    return _uninstall_shared_tail(ctx, man, out, drift,
+                                    skip_created=covered,
+                                    semantic=True)
 
 
 def paths_expand(recorded: str, ctx: Context) -> str:

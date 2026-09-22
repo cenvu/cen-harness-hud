@@ -50,6 +50,9 @@ no resident daemon of its own, no database.
   [PRIVACY.md](PRIVACY.md) for exact disclosure.
 - **Fail-closed configuration surgery** — foreign config customizations are
   never overwritten; conflicts abort the install before any mutation.
+- **Per-surface uninstall ownership** — schema-2 uninstall tracks CEN
+  ownership per config surface, so unrelated user edits survive without
+  restoring stale whole-file CEN state.
 - **Privacy at rest** — personal-but-non-secret persistent state lives under
   a `0700` directory with `0600` files.
 

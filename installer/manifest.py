@@ -1,4 +1,4 @@
-"""Install manifest: schema v1, atomic writes, mode 0600, minimized facts.
+"""Install manifest: schema v2, atomic writes, mode 0600, minimized facts.
 
 Stored ONLY ownership/rollback facts. Never stored: email, plan, quota,
 balance, API key, key fingerprint, CODEX account/profiles, hostname,
@@ -11,7 +11,7 @@ import time
 
 from . import paths
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def exists(ctx: paths.Context) -> bool:
@@ -24,7 +24,8 @@ def load(ctx: paths.Context):
 
 
 def build(ctx: paths.Context, install_id: str, components: list,
-          skipped: dict, journal_records: list, patched_files: list) -> dict:
+          skipped: dict, journal_records: list, patched_files: list,
+          semantic_patches: list = None) -> dict:
  # fix 5: platform/architecture derive from actual runtime truth.
     from . import discover
 
@@ -62,6 +63,7 @@ def build(ctx: paths.Context, install_id: str, components: list,
             if r["type"] == "symlink"
         ],
         "patched_files": patched_files,
+        "semantic_patches": semantic_patches or [],
         "backup_root": paths.home_rel(
             os.path.join(ctx.backups_root, install_id), ctx
         ),

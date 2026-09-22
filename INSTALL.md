@@ -90,17 +90,37 @@ supported: run `cen-hud uninstall` first.
 cen-hud uninstall
 ```
 
-Removes exactly what the manifest recorded — restoring patched configs from
-private backups only if you have not edited them since install — and keeps
-your personal runtime state (`~/.config/herdr/cen-harness-hud-quota/`)
-unless you delete it yourself.
+Uninstall behavior depends on the install manifest schema recorded at
+install time.
 
-If any file was modified since install, it is left untouched (your edits are
-never overwritten). In that case the install manifest is retired to a private
-archive under `~/.config/cen-harness-hud/drift-archive/` together with the
-kept backups, so no active manifest falsely claims the product is still
-installed; reinstalling afterwards proceeds through normal conflict checks
-and will still refuse to overwrite a genuinely conflicting customization.
+**Schema 2 installs (v0.3.1 and later):**
+
+- The installer keeps private full-file backups for failed-install rollback,
+  and the manifest additionally records the exact CEN-owned semantic config
+  surfaces (per-key/table entries with their before/after state).
+- A clean uninstall reverses ONLY those owned surfaces, and only while each
+  one still matches its recorded CEN after-state.
+- Unrelated user edits elsewhere in the same file do NOT block the safe
+  inverse of owned surfaces.
+- A user edit TO an owned surface is preserved and treated as semantic
+  drift: it is never overwritten, and drift evidence is retained.
+- CEN-created config files are deleted only when no user content remains
+  in them.
+- Your personal runtime state (`~/.config/herdr/cen-harness-hud-quota/`) is
+  kept unless you delete it yourself.
+
+**Schema 1 legacy installs (v0.3.0 and earlier):**
+
+- Remain supported by the newer manager through the conservative v0.3.0
+  whole-file/hash uninstall path: patched configs are restored from private
+  backups only when the whole file still matches, otherwise the manifest is
+  retired to a private archive under
+  `~/.config/cen-harness-hud/drift-archive/` with the kept backups.
+- Schema-2 ownership begins only after a v0.3.1 installation.
+
+Upgrades from a previous installed version remain uninstall-first: run
+`cen-hud uninstall` before installing the new version. In-place upgrades
+are not supported.
 
 ## Requirements notes
 

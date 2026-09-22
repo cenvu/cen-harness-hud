@@ -44,14 +44,26 @@ HUD.
 ## Configuration mutation safety
 
 Every foreign config change follows:
-`read → validate → conflict check → private backup → mutate → verify`.
+`read → validate → conflict check → private byte backup → mutate → verify`.
 
-- Backups are written mode `0600` under `~/.config/cen-harness-hud/backups/`.
+- Private backups are written mode `0600` under
+  `~/.config/cen-harness-hud/backups/` (`0700` dirs); retired drift archives
+  keep the same `0700`/`0600` permissions.
 - Foreign customizations abort the install before any mutation (no `--force`).
-- Uninstall restores backups only when the file still matches the recorded
-  post-install hash; user edits are warned about, never clobbered. When edits
-  are detected, the install manifest is retired to a private `0600` archive
-  (with the retained backups) rather than left claiming an active install.
+
+**Failed install:** the exact pre-attempt bytes and file mode are restored
+from the private backup.
+
+**Schema-2 clean uninstall (v0.3.1 and later):** each CEN-owned semantic
+surface is independently checked against its recorded after-state. If
+unchanged, only that surface is inversed; if user-modified, it is NOT
+overwritten and drift evidence is retained. Unrelated changes elsewhere in
+the same file are preserved and do not block a safe inverse.
+
+**Schema-1 legacy installs** keep the conservative behavior: backups are
+restored only when the whole file still matches the recorded post-install
+hash; on mismatch the manifest is retired to a private `0600` archive (with
+the retained backups) rather than left claiming an active install.
 
 ## Privacy at rest
 

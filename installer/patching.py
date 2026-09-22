@@ -237,6 +237,219 @@ def replace_toml_key(text: str, table: tuple, key: str,
     return result
 
 
+# ── Semantic ownership surgery (schema-v2 uninstall inverses) ───────────────
+# All helpers are purely mechanical: they touch exactly one owned surface and
+# preserve every sibling key/entry/line. Callers must already have verified
+# the current value equals the recorded CEN after-state.
+
+def json_get_path(data: dict, dotted: str):
+    """Return (found, value) for a dotted key path inside nested dicts."""
+    node = data
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return False, None
+        node = node[part]
+    return True, node
+
+
+def json_set_path(data: dict, dotted: str, value) -> None:
+    """Set a dotted key path, creating intermediate dicts (JSON only)."""
+    parts = dotted.split(".")
+    node = data
+    for part in parts[:-1]:
+        child = node.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            node[part] = child
+        node = child
+    node[parts[-1]] = value
+
+
+def json_delete_path(data: dict, dotted: str) -> bool:
+    """Delete a dotted key path. Returns True if a key was removed."""
+    parts = dotted.split(".")
+    node = data
+    for part in parts[:-1]:
+        child = node.get(part)
+        if not isinstance(child, dict):
+            return False
+        node = child
+    if isinstance(node, dict) and parts[-1] in node:
+        del node[parts[-1]]
+        return True
+    return False
+
+
+def json_prune_containers(data: dict, containers: list) -> None:
+    """Remove listed CEN-created containers when they hold no user content.
+
+    Each container entry is {"path": <dotted>, "keys": [<CEN-written keys>],
+    "values": {key: <exact CEN-written value>}, "kind": "dict" (default) |
+    "list"}. A dict container is pruned only when every remaining key is
+    within its recorded CEN-written key set AND still equals the recorded
+    CEN-written value (a user-modified value vetoes pruning even when the
+    key name matches). A list container is pruned only when empty.
+    Deepest containers first so parents can cascade.
+    """
+    for entry in sorted(containers, key=lambda e: -e["path"].count(".")):
+        found, node = json_get_path(data, entry["path"])
+        if not found:
+            continue
+        if entry.get("kind") == "list":
+            if isinstance(node, list) and not node:
+                json_delete_path(data, entry["path"])
+            continue
+        if not isinstance(node, dict):
+            continue
+        allowed = set(entry.get("keys", []))
+        values = entry.get("values", {})
+        if set(node.keys()) <= allowed and all(
+                k in values and node[k] == values[k] for k in node):
+            json_delete_path(data, entry["path"])
+
+
+def json_remove_list_entry(data: list, predicate) -> bool:
+    """Remove list entries matching predicate. Returns True if any removed."""
+    kept = [e for e in data if not predicate(e)]
+    if len(kept) == len(data):
+        return False
+    data[:] = kept
+    return True
+
+
+def toml_get_key(text: str, table: tuple, key: str):
+    """Return (found, value) for a TOML key via whole-doc parse."""
+    try:
+        parsed = toml_value(text)
+    except Exception:
+        return False, None
+    node = parsed
+    for t in table:
+        if not isinstance(node, dict) or t not in node:
+            return False, None
+        node = node[t]
+    if not isinstance(node, dict) or key not in node:
+        return False, None
+    return True, node[key]
+
+
+def toml_remove_key(text: str, table: tuple, key: str) -> str:
+    """Remove one TOML key (single-line scalar/array or multiline array
+    block) from [table], preserving every other byte. Prunes the section
+    header only when the section body holds no keys/comments at all.
+    Raises on missing table/key or ambiguous layout (callers fail closed).
+    """
+    import re as _re
+
+    lines = text.splitlines()
+    sec_start, sec_end = find_section_span(lines, table)
+    if sec_start is None:
+        raise ValueError("target table not found: " + ".".join(table))
+    key_re = _re.compile(r"^\s*\"?%s\"?\s*=" % _re.escape(key))
+    key_start = None
+    single_line = False
+    for i in range(sec_start, min(sec_end, len(lines))):
+        stripped = lines[i].strip()
+        if lines[i].rstrip() == "{k} = [".format(k=key):
+            key_start = i
+            single_line = False
+            break
+        if key_re.match(lines[i]):
+            if "[" in lines[i]:
+                key_start = i
+                single_line = True
+                break
+            # scalar single-line key
+            key_start = i
+            single_line = True
+            break
+    if key_start is None:
+        raise ValueError("owned key not found: " + key)
+    if single_line:
+        new_lines = lines[:key_start] + lines[key_start + 1:]
+    else:
+        key_end = _find_array_block_end(lines, key_start)
+        new_lines = lines[:key_start] + lines[key_end + 1:]
+    # prune the section header only when its body is now fully blank:
+    # an empty section proves no user content lives there. Also drop one
+    # preceding blank line: insertion adds exactly one, so pruning both
+    # restores pre-insertion bytes in the common case.
+    sec_start2, sec_end2 = find_section_span(new_lines, table)
+    if sec_start2 is not None:
+        if all(not ln.strip() for ln in new_lines[sec_start2 + 1:sec_end2]):
+            drop_from = sec_start2
+            if drop_from > 0 and not new_lines[drop_from - 1].strip():
+                drop_from -= 1
+            new_lines = new_lines[:drop_from] + new_lines[sec_end2:]
+    result = "\n".join(new_lines)
+    if text.endswith("\n"):
+        result += "\n"
+    return result
+
+
+def codex_hook_entry_present(data: dict, command: str) -> bool:
+    """True when hooks.json already holds the exact CEN SessionStart entry."""
+    try:
+        entries = data["hooks"]["SessionStart"]
+    except (KeyError, TypeError):
+        return False
+    if not isinstance(entries, list):
+        return False
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        for hook in entry.get("hooks") or []:
+            if (isinstance(hook, dict)
+                    and hook.get("type") == "command"
+                    and hook.get("command") == command):
+                return True
+    return False
+
+
+def codex_remove_hook_entry(data: dict, command: str) -> bool:
+    """Remove the exact CEN SessionStart entry; preserve unrelated hooks.
+    Prunes containers CEN created when they are left empty. Returns True
+    when an entry was removed."""
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    entries = hooks.get("SessionStart")
+    if not isinstance(entries, list):
+        return False
+    removed = False
+    survivors = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            survivors.append(entry)
+            continue
+        nested = entry.get("hooks")
+        if not isinstance(nested, list):
+            survivors.append(entry)
+            continue
+        kept = [h for h in nested
+                if not (isinstance(h, dict)
+                        and h.get("type") == "command"
+                        and h.get("command") == command)]
+        if len(kept) == len(nested):
+            survivors.append(entry) # untouched entry
+            continue
+        removed = True
+        if kept:
+            survivors.append({**entry, "hooks": kept})
+        elif set(entry.keys()) != {"hooks"}:
+            survivors.append({**entry, "hooks": []})
+        # else: entry held only the CEN hook — drop the entry
+    if not removed:
+        return False
+    if survivors:
+        hooks["SessionStart"] = survivors
+    else:
+        hooks.pop("SessionStart", None)
+    if not hooks:
+        data.pop("hooks", None)
+    return True
+
+
 # ── Symlinks ──────────────────────────────────────────────────────────────────
 
 def classify_symlink(link: str, desired_target: str, cen_roots: list) -> str:

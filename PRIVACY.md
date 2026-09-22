@@ -54,3 +54,35 @@ The optional Pi balance integration:
 
 `cen-hud uninstall` does not delete personal runtime state automatically;
 delete `~/.config/herdr/cen-harness-hud-quota/` manually if you want it gone.
+
+## Installer ownership state
+
+Separate from the runtime state above, the installer keeps local,
+private ownership records so installs can be rolled back and uninstalled
+safely. These are installer configuration facts, not telemetry.
+
+The install manifest (`~/.config/cen-harness-hud/install-manifest.json`,
+mode `0600`) may contain non-secret installer ownership facts such as:
+
+- HOME-relative config paths
+- file content hashes
+- file modes
+- component names
+- semantic owned key/table locators for config surfaces CEN changes
+- the semantic before state/value of such a surface
+- the semantic after value
+- the ownership basis (such as insert/adopt/migrate)
+
+Private backups (`~/.config/cen-harness-hud/backups/`, `0700` dirs /
+`0600` files) may contain exact copies of installer-touched configuration
+files so a failed install can restore exact bytes. Drift archives may retain
+manifests and backups when an owned surface was edited.
+
+Boundaries:
+
+- the installer does NOT back up `auth.json`
+- the installer does NOT read or copy OAuth tokens
+- the installer does NOT read or copy API-key stores
+- the semantic manifest holds installer config-ownership facts, NOT Codex
+  telemetry, session, account, or quota state
+- runtime quota-state disclosure above remains separate and unchanged

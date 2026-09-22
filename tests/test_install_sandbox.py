@@ -123,7 +123,7 @@ class Base(unittest.TestCase):
                     "@" + "gmail"):
             self.assertNotIn(bad, raw)
         man = json.loads(raw)
-        self.assertEqual(man["schema_version"], 1)
+        self.assertEqual(man["schema_version"], 2)
         return man
 
     def assertModes(self):
@@ -581,7 +581,10 @@ class OpenCodeRowTests(Base):
         self.assertTrue(line.startswith("FAIL"), line)
         self.assertEqual(r.returncode, 1)
 
-    # M — uninstall restores pre-install bytes and mode
+    # M — uninstall applies semantic inverse (schema v2). Pre-existing
+    # exact-CEN rows are adopted as CEN ownership (indistinguishable from
+    # inherited CEN state, which is the F-3 class): uninstall removes them
+    # rather than resurrecting them, while unrelated user keys/mode survive.
     def test_uninstall_restores_pre_opencode_config_bytes_and_mode(self):
         original = ("[ui.sidebar.agents]\nrow_gap = 3\n"
                     + self.ROWS_TABLE + self.AGY_TOML)
@@ -591,9 +594,14 @@ class OpenCodeRowTests(Base):
         self.assertEqual(self._rows()["opencode"], self.OPENCODE)
         r = self.cli("uninstall")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("restored:", r.stdout)
-        with open(cfg_path) as f:
-            self.assertEqual(f.read(), original)
+        self.assertIn("semantic-inversed:", r.stdout)
+        rows = tomllib.loads(self.read(
+            ".config/herdr/config.toml")
+        )["ui"]["sidebar"]["agents"].get("rows_by_agent", {})
+        self.assertNotIn("agy", rows)
+        self.assertNotIn("opencode", rows)
+        text = self.read(".config/herdr/config.toml")
+        self.assertIn('row_gap = 3', text)
         self.assertEqual(stat.S_IMODE(os.stat(cfg_path).st_mode), 0o640)
 
     # N — rollback after induced failure restores bytes and mode
@@ -656,8 +664,11 @@ class TransactionTests(Base):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("UNINSTALL_COMPLETE", r.stdout)
         self.assertNotIn("DRIFT", r.stdout)
-        self.assertEqual(self.read(".gemini/antigravity-cli/settings.json"),
-                         '{"keep": true}')
+        # schema-v2 restores the USER SEMANTIC baseline (parsed equality);
+        # JSON bytes are rewritten through the canonical dump, so byte
+        # identity is not the contract — CEN residue absence is.
+        self.assertEqual(json.loads(self.read(
+            ".gemini/antigravity-cli/settings.json")), {"keep": True})
         for name in ("cen-hud", "cen-codex", "cen-codex-status"):
             self.assertFalse(os.path.lexists(
                 os.path.join(self.home, ".local/bin", name)))
@@ -772,10 +783,10 @@ class HardeningTests(Base):
             cur = hashlib.sha256(f.read()).hexdigest()
         self.assertNotEqual(cur, rec["before_sha256"])
         self.assertEqual(cur, rec["after_sha256"])
- # uninstall restores ORIGINAL bytes and mode
+ # uninstall restores ORIGINAL bytes and mode via semantic inverse
         r = self.cli("uninstall")
         self.assertEqual(r.returncode, 0)
-        self.assertIn("restored:", r.stdout)
+        self.assertIn("semantic-inversed:", r.stdout)
         p = os.path.join(self.home, ".config/herdr/config.toml")
         with open(p) as f:
             self.assertEqual(f.read(), "[ui.sidebar.agents]\nrow_gap = 3\n")
@@ -1219,33 +1230,24 @@ class DriftRetirementTests(Base):
         return p
 
     def test_drift_uninstall_retires_manifest_keeps_evidence(self):
+        # Schema v2: an UNRELATED user edit no longer forces manifest
+        # retirement. The owned surface still inverts cleanly, the user edit
+        # survives, and uninstall completes without drift.
         drifted_path = self._setup_with_drift()
         r = self.cli("uninstall")
         self.assertEqual(r.returncode, 0)
-        self.assertIn("UNINSTALL_COMPLETE_WITH_DRIFT", r.stdout)
-        self.assertIn("drift-archive", r.stdout)
- # drifted user file untouched (edit preserved, CEN keys intact)
+        self.assertIn("semantic-inversed:", r.stdout)
+        self.assertIn("UNINSTALL_COMPLETE", r.stdout)
+        self.assertNotIn("WITH_DRIFT", r.stdout)
+ # unrelated user edit untouched; CEN-owned surface removed
         after = json.loads(open(drifted_path).read())
         self.assertEqual(after["theme"], "ocean")
-        self.assertIn("status.py", after["statusLine"]["command"])
- # ACTIVE manifest gone
+        self.assertNotIn("statusLine", after)
+ # CLEAN uninstall removes the active manifest (nothing to retire)
         self.assertFalse(os.path.exists(self.manifest_path()))
- # archived manifest retained, private modes
         arch_root = os.path.join(self.home,
                                  ".config/cen-harness-hud/drift-archive")
-        self.assertTrue(os.path.isdir(arch_root))
-        self.assertEqual(stat.S_IMODE(os.stat(arch_root).st_mode), 0o700)
-        entries = os.listdir(arch_root)
-        self.assertEqual(len(entries), 1)
-        dest_dir = os.path.join(arch_root, entries[0])
-        self.assertEqual(stat.S_IMODE(os.stat(dest_dir).st_mode), 0o700)
-        archived = os.path.join(dest_dir, "install-manifest.json")
-        self.assertTrue(os.path.isfile(archived))
-        self.assertEqual(stat.S_IMODE(os.stat(archived).st_mode), 0o600)
-        self.assertEqual(json.load(open(archived))["schema_version"], 1)
- # backups retained
-        self.assertTrue(os.path.isdir(os.path.join(
-            self.home, ".config/cen-harness-hud/backups")))
+        self.assertFalse(os.path.exists(arch_root))
  # personal runtime quota state untouched
         self.assertTrue(os.path.isfile(os.path.join(
             self.home,
@@ -1335,11 +1337,14 @@ class DriftEvidenceLifetimeTests(Base):
         assert self.install("--agy").returncode == 0
         p = os.path.join(self.home, ".gemini/antigravity-cli/settings.json")
         edited = json.loads(open(p).read())
-        edited["theme"] = "ocean-%d" % len(os.listdir(os.path.join(
-            self.home, ".config/cen-harness-hud/drift-archive"))) \
+        # drift the CEN-OWNED surface itself so uninstall must retire the
+        # manifest (an unrelated-key edit resolves cleanly under schema v2)
+        edited["statusLine"]["command"] = "user-customized-%d" % len(
+            os.listdir(os.path.join(
+                self.home, ".config/cen-harness-hud/drift-archive"))) \
             if os.path.isdir(os.path.join(
                 self.home,
-                ".config/cen-harness-hud/drift-archive")) else "ocean"
+                ".config/cen-harness-hud/drift-archive")) else "user-customized"
         open(p, "w").write(json.dumps(edited))
         assert self.cli("uninstall").returncode == 0
 

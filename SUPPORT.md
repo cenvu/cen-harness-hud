@@ -25,6 +25,14 @@ The code is POSIX-oriented, but no claims are made until tested.
 - Herdr may need a configuration reload or restart after (re)installing
   before new sidebar/plugin configuration is visible.
 
+## Installer ownership behavior (v0.3.1)
+
+- Schema-2 semantic uninstall: only CEN-owned config surfaces are
+  reversed; unrelated user edits in the same file are preserved.
+- Schema-1 legacy uninstall compatibility: older manifests uninstall
+  through the conservative whole-file path.
+- Upgrades remain uninstall-first.
+
 ## Codex telemetry behavior
 
 - The Herdr weekly countdown is snapshot/event refreshed, not a live ticker.

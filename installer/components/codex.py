@@ -8,6 +8,7 @@ import copy
 import os
 
 from .. import patching
+from .. import semantic as sem_mod
 from ..paths import ComponentError, ConflictError
 
 STATUS_LINE_LEGACY_V020 = [
@@ -35,6 +36,76 @@ def _command_symlinks(ctx) -> list:
 
 def _session_hook_command(ctx) -> str:
     return ctx.codex_session_hook_installed
+
+
+SESSION_HOOK_SUFFIX = os.path.join("integrations", "codex",
+                                     "session_hook.py")
+
+
+def _is_proven_cen_hook_command(raw: object, command: str, ctx) -> bool:
+    """Narrow proof that a hooks.json command is an older CEN hook: an
+    absolute path resolving inside the CEN product share root and ending at
+    the session-hook entrypoint, but not equal to the current command.
+    Unrelated commands (including foreign session_hook.py paths) fail every
+    check and are always preserved."""
+    if not isinstance(raw, str) or not raw.strip():
+        return False
+    if raw == command:
+        return False
+    candidate = os.path.realpath(os.path.expanduser(raw.strip()))
+    share = os.path.realpath(ctx.share_root)
+    if candidate != share and not candidate.startswith(share + os.sep):
+        return False
+    return candidate.endswith(SESSION_HOOK_SUFFIX)
+
+
+def _strip_legacy_hooks(data: dict, command: str, ctx):
+    """Remove proven older CEN SessionStart entries, preserving everything
+    else. Returns (document, removed_any)."""
+    out = copy.deepcopy(data)
+    hooks = out.get("hooks")
+    if not isinstance(hooks, dict):
+        return out, False
+    entries = hooks.get("SessionStart")
+    if not isinstance(entries, list):
+        return out, False
+    removed = False
+    survivors = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            survivors.append(entry)
+            continue
+        nested = entry.get("hooks")
+        if not isinstance(nested, list):
+            survivors.append(entry)
+            continue
+        kept = [h for h in nested
+                if not (isinstance(h, dict)
+                        and h.get("type") == "command"
+                        and _is_proven_cen_hook_command(
+                            h.get("command"), command, ctx))]
+        if len(kept) != len(nested):
+            removed = True
+        if kept:
+            survivors.append({**entry, "hooks": kept})
+        elif set(entry.keys()) != {"hooks"}:
+            survivors.append({**entry, "hooks": []})
+    if removed:
+        if survivors:
+            hooks["SessionStart"] = survivors
+        else:
+            hooks.pop("SessionStart", None)
+    return out, removed
+
+
+def _toml_semantic(path, table, key, value, basis):
+    return sem_mod.rec(path, "toml", "TOML_KEY", key, sem_mod.ABSENT,
+                       value, basis, table=table)
+
+
+def _hook_semantic(hooks_path, command, basis, containers=None):
+    return sem_mod.rec(hooks_path, "json", "CODEX_SESSION_HOOK", command,
+                       sem_mod.ABSENT, True, basis, containers=containers)
 
 
 def _desired_hooks(data, command: str):
@@ -70,7 +141,7 @@ def _desired_hooks(data, command: str):
     return out, True
 
 
-def _plan_status_line(path, text, actions, notes):
+def _plan_status_line(path, text, actions, notes, claims):
     try:
         state = patching.classify_toml_key(
             text, ("tui",), "status_line", STATUS_LINE_DESIRED
@@ -87,9 +158,13 @@ def _plan_status_line(path, text, actions, notes):
             "literal_lines": STATUS_LINE_LITERAL,
             "desired_value": STATUS_LINE_DESIRED,
             "backup_name": "config.toml",
+            "semantic": _toml_semantic(path, ("tui",), "status_line",
+                                       STATUS_LINE_DESIRED, "insert"),
         })
     elif state == "equal":
         notes.append("codex [tui].status_line already CEN-owned — no-op")
+        claims.append(_toml_semantic(path, ("tui",), "status_line",
+                                     STATUS_LINE_DESIRED, "adopt"))
     else:
         legacy = patching.classify_toml_key(
             text, ("tui",), "status_line", STATUS_LINE_LEGACY_V020
@@ -104,6 +179,8 @@ def _plan_status_line(path, text, actions, notes):
                 "literal_lines": STATUS_LINE_LITERAL,
                 "desired_value": STATUS_LINE_DESIRED,
                 "backup_name": "config.toml",
+                "semantic": _toml_semantic(path, ("tui",), "status_line",
+                                           STATUS_LINE_DESIRED, "migrate"),
             })
             notes.append(
                 "codex [tui].status_line exact prior CEN value — will migrate"
@@ -130,6 +207,8 @@ def _plan_hooks_feature(path, text, actions, notes):
             "literal": "true",
             "desired_value": True,
             "backup_name": "config.toml",
+            "semantic": _toml_semantic(path, ("features",), "hooks",
+                                       True, "insert"),
         })
     elif state == "equal":
         notes.append("codex [features].hooks already enabled — no-op")
@@ -142,6 +221,7 @@ def _plan_hooks_feature(path, text, actions, notes):
 def plan(ctx) -> dict:
     actions = []
     notes = []
+    claims = []
     cen_roots = [ctx.share_root]
 
     # 1. Preserve native run-state/activity plus native quota in the footer.
@@ -159,11 +239,17 @@ def plan(ctx) -> dict:
                     + "\n".join(STATUS_LINE_LITERAL)
                     + "\n]\n",
             "mode": 0o644,
+            "semantics": [
+                _toml_semantic(path, ("features",), "hooks", True,
+                               "insert"),
+                _toml_semantic(path, ("tui",), "status_line",
+                               STATUS_LINE_DESIRED, "insert"),
+            ],
         })
     else:
         with open(path, "r") as f:
             text = f.read()
-        _plan_status_line(path, text, actions, notes)
+        _plan_status_line(path, text, actions, notes, claims)
         _plan_hooks_feature(path, text, actions, notes)
 
     # 2. Native SessionStart hook learns the actual profile and provides a
@@ -177,11 +263,27 @@ def plan(ctx) -> dict:
             "path": hooks_path,
             "data": desired,
             "mode": 0o644,
+            "semantics": [
+                _hook_semantic(
+                    hooks_path, command, "insert",
+                    containers=[
+                        {"path": "hooks", "keys": ["SessionStart"],
+                         "values": {"SessionStart": desired["hooks"][
+                             "SessionStart"]}},
+                        {"path": "hooks.SessionStart",
+                         "keys": [], "kind": "list"}]),
+            ],
         })
     else:
         try:
             current = patching.load_json(hooks_path)
-            desired, changed = _desired_hooks(current, command)
+            stripped, legacy_removed = _strip_legacy_hooks(
+                current, command, ctx)
+            had_hooks = isinstance(current.get("hooks"), dict)
+            had_ss = isinstance((current.get("hooks") or {}).get(
+                "SessionStart"), list)
+            desired, changed = _desired_hooks(stripped, command)
+            changed = changed or legacy_removed
         except ComponentError:
             raise
         except Exception as e:
@@ -189,17 +291,35 @@ def plan(ctx) -> dict:
                 f"codex: malformed hooks.json ({e}); fail-closed"
             )
         if changed:
+            containers = []
+            if not had_hooks:
+                containers.append(
+                    {"path": "hooks", "keys": ["SessionStart"],
+                     "values": {"SessionStart": desired["hooks"][
+                         "SessionStart"]}})
+            if not had_ss:
+                containers.append({"path": "hooks.SessionStart",
+                                   "keys": [], "kind": "list"})
+            basis = "migrate" if legacy_removed else "insert"
             actions.append({
                 "type": "patch_json_document",
                 "path": hooks_path,
                 "expected_current_data": current,
                 "desired_data": desired,
                 "backup_name": "hooks.json",
+                "semantic": _hook_semantic(hooks_path, command, basis,
+                                           containers=containers),
             })
+            if legacy_removed:
+                notes.append(
+                    "codex SessionStart hook: proven older CEN entry "
+                    "migrated — exactly one current hook afterwards"
+                )
         else:
             notes.append(
                 "codex SessionStart telemetry hook already CEN-owned — no-op"
             )
+            claims.append(_hook_semantic(hooks_path, command, "adopt"))
 
     # 3. Command symlinks into installed product root.
     for name, target in _command_symlinks(ctx):
@@ -228,6 +348,7 @@ def plan(ctx) -> dict:
     return {
         "component": "codex",
         "actions": actions,
+        "claims": claims,
         "notes": notes,
         "noop": not any(a["type"] != "noop" for a in actions),
     }
