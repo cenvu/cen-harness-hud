@@ -76,10 +76,9 @@ def install_product_files(ctx: Context, journal: list) -> None:
                                                          "VERSION")})
  # normalize modes: dirs 0755, files 0644, CLI entry executable
  # live-acceptance fix: ONLY the directly-exec'd integration
- # entrypoints get +x (cen-codex → launcher.py, cen-codex-status →
- # status.py); every other runtime file stays 0644.
+ # entrypoints get +x (cen-codex-status → status.py and the SessionStart
+ # hook); every other runtime file stays 0644.
     exec_relpaths = {
-        os.path.join("integrations", "codex", "launcher.py"),
         os.path.join("integrations", "codex", "status.py"),
         os.path.join("integrations", "codex", "session_hook.py"),
     }

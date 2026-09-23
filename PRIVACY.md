@@ -16,7 +16,6 @@ client — full disclosure below.
 | Integration | Stored | Where |
 |---|---|---|
 | AGY | sanitized account local-part (truncated), plan tier, quota percentages | `~/.config/herdr/cen-harness-hud-quota/agy/*.json` (`0700` dir, `0600` files) |
-| Codex profiles | one-way short profile tag mapped to its CODEX_HOME filesystem path | `~/.config/herdr/cen-harness-hud-quota/profiles/` (`0700` dir, `0600` files) |
 | Codex sessions | CODEX_HOME path plus schema/timing metadata, filename is a SHA-256-derived key from the native Codex session id (the raw session id is not used as the filename) | `~/.config/herdr/cen-harness-hud-quota/codex-sessions/` (`0700` dir, `0600` files) |
 | Codex snapshots | sanitized account local-part alias, plan tier, normalized quota remaining data, window duration, reset timestamp, fetched/attempt timing, stale flag — hash-keyed by session id | `~/.config/herdr/cen-harness-hud-quota/codex-snapshots/` (`0700` dir, `0600` files) |
 | Claude Code | Nothing persistent; StatusLine payload is processed in memory and Herdr metadata is transient | None |
@@ -25,6 +24,11 @@ No full email address, no OAuth token, no API key, and no `auth.json`
 content is stored in any of the above. Quota snapshot metadata IS persisted
 locally as described; only money balances (PAYG cash amounts) are never
 stored.
+
+Versions through v0.5.0 may have created
+`~/.config/herdr/cen-harness-hud-quota/profiles/` for the retired launcher.
+v0.6.0 does not read or write that directory. Normal uninstall intentionally
+does not delete runtime state automatically.
 
 When you explicitly supply an additional existing `CODEX_HOME`, its
 HOME-relative filesystem path may appear in private CEN semantic ownership and

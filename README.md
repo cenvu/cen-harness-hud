@@ -38,8 +38,8 @@ HUD can add telemetry prerequisites to explicitly supplied, existing
 HOME-relative profile directories through repeatable `--codex-home` installer
 arguments. The official Herdr Codex integration owns native session identity;
 CEN HUD maps that structured session to its profile for local attribution.
-Raw `CODEX_HOME` profiles no longer require the legacy `cen-codex` launcher for
-HUD attribution when both integrations are installed.
+Raw profiles use native `CODEX_HOME=<profile> codex`; CEN ships no launcher
+wrapper. The one-shot `cen-codex-status` helper remains available.
 
 ## Platform support
 

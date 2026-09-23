@@ -31,57 +31,45 @@ class TelemetryResolverTests(unittest.TestCase):
         import shutil
         shutil.rmtree(self.base, ignore_errors=True)
 
-    def test_native_session_mapping_beats_launcher_fallback(self):
+    def test_session_mapping_is_authoritative(self):
         session = "thr_native"
         native = os.path.join(self.home, ".codex-native")
-        legacy = os.path.join(self.home, ".codex-legacy")
         self.assertTrue(
             telemetry.write_session_mapping(self.home, session, native, 100.0)
         )
         with mock.patch.object(telemetry.status, "thread_exists") as probe:
-            got = telemetry.resolve_codex_home(
-                self.home, session, launcher_home=legacy)
+            got = telemetry.resolve_codex_home(self.home, session)
         self.assertEqual(got, os.path.realpath(native))
         probe.assert_not_called()
 
-    def test_generic_session_resolves_default_profile_without_launcher_token(self):
+    def test_missing_session_mapping_fails_closed(self):
         session = "thr_generic"
-        default = os.path.realpath(os.path.join(self.home, ".codex"))
         with mock.patch.object(
                 telemetry.status, "thread_exists",
-                side_effect=lambda sid, codex_home=None: (
-                    sid == session and os.path.realpath(codex_home) == default)):
-            got = telemetry.resolve_codex_home(self.home, session, None)
-        self.assertEqual(got, default)
-        self.assertEqual(
-            telemetry.read_session_mapping(self.home, session), default)
+                return_value=True) as probe:
+            self.assertIsNone(
+                telemetry.resolve_codex_home(self.home, session))
+        probe.assert_not_called()
 
-    def test_generic_resolution_is_cwd_independent(self):
+    def test_session_mapping_is_cwd_independent(self):
         session = "thr_cwd"
-        default = os.path.realpath(os.path.join(self.home, ".codex"))
+        mapped = os.path.join(self.home, "profiles", "mapped")
+        os.makedirs(mapped)
+        telemetry.write_session_mapping(self.home, session, mapped)
         a = tempfile.mkdtemp(dir=self.base)
         b = tempfile.mkdtemp(dir=self.base)
         old = os.getcwd()
         try:
-            with mock.patch.object(
-                    telemetry.status, "thread_exists",
-                    return_value=True):
-                os.chdir(a)
-                first = telemetry.resolve_codex_home(
-                    self.home, session, None)
-            os.unlink(telemetry.mapping_path(self.home, session))
-            with mock.patch.object(
-                    telemetry.status, "thread_exists",
-                    return_value=True):
-                os.chdir(b)
-                second = telemetry.resolve_codex_home(
-                    self.home, session, None)
+            os.chdir(a)
+            first = telemetry.resolve_codex_home(self.home, session)
+            os.chdir(b)
+            second = telemetry.resolve_codex_home(self.home, session)
         finally:
             os.chdir(old)
-        self.assertEqual(first, default)
-        self.assertEqual(second, default)
+        self.assertEqual(first, os.path.realpath(mapped))
+        self.assertEqual(second, os.path.realpath(mapped))
 
-    def test_known_profile_can_be_resolved_without_launcher_registration(self):
+    def test_stale_launcher_profile_map_is_ignored(self):
         session = "thr_alt"
         alt = os.path.realpath(os.path.join(self.home, "profiles", "alt"))
         pdir = os.path.join(
@@ -90,21 +78,17 @@ class TelemetryResolverTests(unittest.TestCase):
         os.makedirs(pdir)
         with open(os.path.join(pdir, "ABC.json"), "w") as f:
             json.dump({"profile_tag": "ABC", "codex_home": alt}, f)
-        default = os.path.realpath(os.path.join(self.home, ".codex"))
-        def owns(sid, codex_home=None):
-            return sid == session and os.path.realpath(codex_home) == alt
         with mock.patch.object(telemetry.status, "thread_exists",
-                               side_effect=owns):
-            got = telemetry.resolve_codex_home(self.home, session, None)
-        self.assertNotEqual(got, default)
-        self.assertEqual(got, alt)
+                               return_value=True) as probe:
+            got = telemetry.resolve_codex_home(self.home, session)
+        self.assertIsNone(got)
+        probe.assert_not_called()
 
     def test_unknown_session_fails_closed_without_guessing(self):
         with mock.patch.object(telemetry.status, "thread_exists",
                                return_value=False):
             self.assertIsNone(
-                telemetry.resolve_codex_home(
-                    self.home, "thr_unknown", None))
+                telemetry.resolve_codex_home(self.home, "thr_unknown"))
 
     def test_session_mapping_is_private_and_hash_keyed(self):
         session = "thr_secretish_identifier"
@@ -262,8 +246,6 @@ class PublisherLifecycleTests(unittest.TestCase):
         reported = []
         with mock.patch.dict(os.environ, env, clear=False), \
              mock.patch.object(publisher, "pane_get", return_value=pane), \
-             mock.patch.object(publisher, "resolve_launcher_home",
-                               return_value=None), \
              mock.patch.object(
                  publisher.telemetry, "resolve_codex_home",
                  return_value="/fakehome/.codex"), \
@@ -546,20 +528,6 @@ class PublisherPostFetchRaceTests(unittest.TestCase):
             publisher._spawn_worker()
         self.assertNotIn("CEN_CODEX_SESSION_ID", seen)
         self.assertNotIn("CEN_CODEX_REFRESH_REASON", seen)
-
-    def test_launcher_tag_fallback_compatible(self):
-        import launcher as lch
-        tag = lch.compute_tag("/fakehome/.codex")
-        pane_tokens = {"cen_codex_profile": f"{tag}@{os.getpid()}"}
-        with mock.patch.object(
-                publisher, "_profile_mapping_path",
-                return_value="/fakemapping.json"), \
-             mock.patch("builtins.open",
-                        mock.mock_open(read_data='{"tag": "%s", '
-                                                 '"codex_home": "/fakehome/.codex"}'
-                                                 % tag)):
-            got = publisher.resolve_launcher_home("/fakehome", pane_tokens)
-        self.assertEqual(got, os.path.realpath("/fakehome/.codex"))
 
     def test_retired_tokens_still_cleared(self):
         tok = publisher.display_tokens(self.snapshot())

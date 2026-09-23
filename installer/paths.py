@@ -81,12 +81,6 @@ class Context:
         return os.path.join(self.install_root, "integrations", "claude", "status.py")
 
     @property
-    def codex_launcher_installed(self) -> str:
-        return os.path.join(
-            self.install_root, "integrations", "codex", "launcher.py"
-        )
-
-    @property
     def codex_status_installed(self) -> str:
         return os.path.join(self.install_root, "integrations", "codex", "status.py")
 

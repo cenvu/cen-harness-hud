@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Session-native Codex quota telemetry shared by hooks and Herdr rendering.
 
-No credential files are read. Effective Codex profiles are learned from the
-native SessionStart hook environment, the existing CEN launcher mapping, or a
-bounded `thread/read` probe against known profile homes.
+No credential files are read. Effective Codex profiles are learned only from
+the private mapping written by the native CEN SessionStart hook.
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ import math
 import os
 import tempfile
 import time
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Optional
 
 try:
     from . import status
@@ -107,62 +106,15 @@ def read_session_mapping(home: str, session_id: str) -> Optional[str]:
     return os.path.realpath(value)
 
 
-def _known_profile_homes(home: str) -> Iterable[str]:
-    seen = set()
-    default = os.path.realpath(os.path.join(home, ".codex"))
-    seen.add(default)
-    yield default
+def resolve_codex_home(home: str, session_id: Optional[str]) -> Optional[str]:
+    """Resolve profile from the native SessionStart mapping only.
 
-    profile_dir = os.path.join(_root(home), "profiles")
-    try:
-        names = sorted(os.listdir(profile_dir))
-    except OSError:
-        return
-    for name in names:
-        if not name.endswith(".json"):
-            continue
-        data = _read_json(os.path.join(profile_dir, name))
-        value = data.get("codex_home") if data else None
-        if not isinstance(value, str) or not value.strip():
-            continue
-        resolved = os.path.realpath(value)
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        yield resolved
-
-
-def resolve_codex_home(home: str, session_id: Optional[str],
-                       launcher_home: Optional[str] = None) -> Optional[str]:
-    """Resolve profile from session truth, never cwd/launcher alias names."""
-    if session_id:
-        mapped = read_session_mapping(home, session_id)
-        if mapped:
-            return mapped
-
-    if launcher_home:
-        resolved = os.path.realpath(launcher_home)
-        if session_id:
-            try:
-                if status.thread_exists(session_id, codex_home=resolved):
-                    write_session_mapping(home, session_id, resolved)
-                    return resolved
-            except Exception:
-                pass
-        else:
-            return resolved
-
+    A missing mapping is intentionally fail-closed. CEN never guesses from
+    the current directory, launcher tokens, or a scan of possible profiles.
+    """
     if not session_id:
         return None
-
-    for candidate in _known_profile_homes(home):
-        try:
-            if status.thread_exists(session_id, codex_home=candidate):
-                write_session_mapping(home, session_id, candidate)
-                return candidate
-        except Exception:
-            continue
-    return None
+    return read_session_mapping(home, session_id)
 
 
 def _finite(value: Any) -> Optional[float]:

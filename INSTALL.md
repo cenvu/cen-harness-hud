@@ -78,10 +78,10 @@ Installing the Codex component may:
 4. preserve your unrelated existing hooks
 5. fail closed (CONFLICT) if the owned config surface is foreign/custom
 
-CEN HUD does not install or authenticate Codex. `cen-codex` remains installed
-as a legacy compatibility launcher in v0.5.0, but raw `CODEX_HOME` profiles no
-longer require it when the official Herdr integration and CEN custom-home
-telemetry hook are installed. `cen-codex-status` remains supported.
+CEN HUD does not install or authenticate Codex. v0.6.0 ships no Codex launcher
+wrapper: raw profiles use native `CODEX_HOME=<profile> codex` when the official
+Herdr integration and CEN custom-home telemetry hook are installed.
+`cen-codex-status` remains supported as the one-shot structured status helper.
 
 ### Raw Codex multi-profile support
 
@@ -130,8 +130,7 @@ an installation error.
 The installer will:
 
 1. copy the product into `~/.local/share/cen-harness-hud/<version>/`
-2. create command links in `~/.local/bin/` (`cen-hud`, `cen-codex`,
-   `cen-codex-status`)
+2. create command links in `~/.local/bin/` (`cen-hud`, `cen-codex-status`)
 3. patch only the exact config keys it owns, after taking a private backup
    (`0600`) — any foreign customization aborts the install with a CONFLICT
    instead of being overwritten
@@ -158,6 +157,10 @@ including privacy-at-rest permissions.
 Running the installer again at the same version is a no-op
 (`ALREADY_INSTALLED`). Upgrades from a previous installed version are not
 supported: run `cen-hud uninstall` first.
+
+Versions through v0.5.0 may have installed the product-owned `cen-codex` link.
+The normal upgrade path is uninstall-first: the old manifest removes that link,
+and v0.6.0 does not recreate it. Do not remove the old link manually.
 
 ## Uninstall
 

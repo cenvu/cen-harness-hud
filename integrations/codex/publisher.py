@@ -2,18 +2,16 @@
 """Pane-scoped Codex telemetry publisher for Herdr.
 
 Identity/quota resolution is session-native: the active Codex session id and
-its effective CODEX_HOME determine the account. The legacy launcher token is a
-bounded fallback only, never a mandatory identity source.
+the private mapping written by CEN's SessionStart hook determine the account.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 HERE = os.path.dirname(os.path.realpath(os.path.abspath(__file__)))
 HERDR_DIR = os.path.realpath(os.path.join(HERE, "..", "herdr"))
@@ -26,8 +24,6 @@ import telemetry  # noqa: E402
 from herdr_socket import pane_get, report_metadata  # noqa: E402
 
 BRIDGE_SOURCE = "cen-codex-bridge"
-LAUNCHER_SOURCE = "cen-codex-launcher"
-TOKEN_PROFILE = "cen_codex_profile"
 TOKEN_IDENTITY = "cen_codex_identity"
 TOKEN_WEEKLY = "cen_codex_weekly"
 RETIRED_TOKENS = (
@@ -45,75 +41,6 @@ def _socket_path() -> Optional[str]:
         return p
     home = os.environ.get("HOME")
     return os.path.join(home, ".config", "herdr", "herdr.sock") if home else None
-
-
-def _safe_tag(value: Any) -> Optional[str]:
-    if not isinstance(value, str):
-        return None
-    tag = value.strip().upper()
-    if not tag or len(tag) > 64 or any(ch not in "0123456789ABCDEF" for ch in tag):
-        return None
-    return tag
-
-
-def parse_registration(value: Any) -> Optional[Tuple[str, int]]:
-    if not isinstance(value, str) or "@" not in value:
-        return None
-    tag_raw, pid_raw = value.rsplit("@", 1)
-    tag = _safe_tag(tag_raw)
-    try:
-        pid = int(pid_raw)
-    except (TypeError, ValueError):
-        return None
-    if not tag or pid <= 1:
-        return None
-    return tag, pid
-
-
-def pid_is_live(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # Process exists but we cannot signal it — it is alive.
-        return True
-    except OSError:
-        return False
-
-
-def _profile_mapping_path(home: str, tag: str) -> str:
-    return os.path.join(
-        home, ".config", "herdr", "cen-harness-hud-quota", "profiles", f"{tag}.json"
-    )
-
-
-def resolve_launcher_home(home: str, tokens: Dict[str, Any]) -> Optional[str]:
-    parsed = parse_registration(tokens.get(TOKEN_PROFILE))
-    if not parsed:
-        return None
-    tag, pid = parsed
-    if not pid_is_live(pid):
-        return None
-    try:
-        with open(_profile_mapping_path(home, tag)) as f:
-            data = json.load(f)
-        # Compatibility: private launcher writes {"tag": TAG}, reference
-        # tests use {"profile_tag": TAG}. Accept either, but the value must
-        # exactly match the filename tag — never guess.
-        stored = data.get("tag", data.get("profile_tag"))
-        if stored != tag:
-            return None
-        value = data.get("codex_home")
-        return os.path.realpath(value) if isinstance(value, str) and value else None
-    except Exception:
-        return None
-
-
-def _pane_tokens(pane: Dict[str, Any]) -> Dict[str, Any]:
-    tokens = pane.get("tokens")
-    return tokens if isinstance(tokens, dict) else {}
 
 
 def _native_pane_session_id(pane: Any) -> Optional[str]:
@@ -246,8 +173,7 @@ def publish_once(reason: str = "event", start_worker: bool = True,
         return False
 
     session_id = _session_id(pane)
-    launcher_home = resolve_launcher_home(home, _pane_tokens(pane))
-    codex_home = telemetry.resolve_codex_home(home, session_id, launcher_home)
+    codex_home = telemetry.resolve_codex_home(home, session_id)
     if not session_id or not codex_home:
         _report(sock, pane_id, fail_closed_tokens())
         return False

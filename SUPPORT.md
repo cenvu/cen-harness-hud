@@ -59,8 +59,10 @@ The code is POSIX-oriented, but no claims are made until tested.
   SessionStart hook owns only the local session-to-profile telemetry mapping.
 - Codex `SessionStart` is turn-gated. A newly opened TUI may show no account or
   quota metadata until the first actual turn begins.
-- Raw profile HUD attribution does not require `cen-codex` when both official
-  Herdr integration and CEN custom-home telemetry support are installed.
+- Raw profiles use native `CODEX_HOME=<profile> codex`; no CEN Codex launcher
+  wrapper is shipped. The official Herdr integration and CEN custom-home
+  telemetry support provide HUD attribution.
+- `cen-codex-status` remains the supported one-shot structured status helper.
 - The compact Herdr quota surface is weekly/7D. Unavailable quota remains
   unavailable; CEN does not fabricate a value.
 

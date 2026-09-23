@@ -158,14 +158,15 @@ class InstallTests(Base):
                 if fn.endswith((".py", ".toml", ".tmpl")):
                     with open(os.path.join(dirpath, fn)) as f:
                         self.assertNotIn(REPO, f.read())
-        for name in ("cen-hud", "cen-codex", "cen-codex-status"):
+        for name in ("cen-hud", "cen-codex-status"):
             link = os.path.join(self.home, ".local/bin", name)
             self.assertTrue(os.path.islink(link), name)
             self.assertTrue(os.path.realpath(link).startswith(
                 os.path.realpath(root)))
+        self.assertFalse(os.path.lexists(
+            os.path.join(self.home, ".local/bin/cen-codex")))
  # regression: directly-exec'd integration entrypoints keep +x
-        for rel in ("integrations/codex/launcher.py",
-                    "integrations/codex/status.py",
+        for rel in ("integrations/codex/status.py",
                     "integrations/codex/session_hook.py"):
             installed = os.path.join(root, rel)
             self.assertTrue(os.access(installed, os.X_OK), rel)
@@ -296,6 +297,73 @@ class InstallTests(Base):
         r = self.install("--agy")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("harness binary not found", r.stdout)
+
+
+class LegacyLauncherRetirementTests(Base):
+    """A v0.6 manager must retire a v0.5 manifest-owned launcher link."""
+
+    def seed_v050_manifest(self):
+        root = os.path.realpath(os.path.join(
+            self.home, ".local", "share", "cen-harness-hud", "0.5.0"))
+        launcher = os.path.join(root, "integrations", "codex", "launcher.py")
+        status = os.path.join(root, "integrations", "codex", "status.py")
+        os.makedirs(os.path.dirname(launcher), exist_ok=True)
+        for path in (launcher, status):
+            with open(path, "w") as f:
+                f.write("#!/usr/bin/env python3\n")
+            os.chmod(path, 0o755)
+        bindir = os.path.join(self.home, ".local", "bin")
+        os.makedirs(bindir, exist_ok=True)
+        launcher_link = os.path.join(bindir, "cen-codex")
+        status_link = os.path.join(bindir, "cen-codex-status")
+        os.symlink(launcher, launcher_link)
+        os.symlink(status, status_link)
+        self.write("unrelated-user-file", "keep\n")
+        manifest = {
+            "schema_version": 2,
+            "hud_version": "0.5.0",
+            "install_id": "legacy-v050-fixture",
+            "install_root": "~/.local/share/cen-harness-hud/0.5.0",
+            "installed_components": ["codex"],
+            "skipped_components": {},
+            "created_dirs": [],
+            "created_files": [],
+            "created_symlinks": [
+                {"link": "~/.local/bin/cen-codex",
+                 "target": "~/.local/share/cen-harness-hud/0.5.0/"
+                           "integrations/codex/launcher.py"},
+                {"link": "~/.local/bin/cen-codex-status",
+                 "target": "~/.local/share/cen-harness-hud/0.5.0/"
+                           "integrations/codex/status.py"},
+            ],
+            "patched_files": [],
+            "semantic_patches": [],
+            "backup_root": "~/.config/cen-harness-hud/backups/"
+                          "legacy-v050-fixture",
+        }
+        self.write(".config/cen-harness-hud/install-manifest.json",
+                   json.dumps(manifest), 0o600)
+
+    def test_v050_manifest_uninstall_removes_retired_launcher(self):
+        self.seed_v050_manifest()
+        launcher_link = os.path.join(self.home, ".local/bin/cen-codex")
+        status_link = os.path.join(self.home, ".local/bin/cen-codex-status")
+        self.assertTrue(os.path.islink(launcher_link))
+        self.assertTrue(os.path.islink(status_link))
+
+        r = self.cli("uninstall")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("UNINSTALL_COMPLETE", r.stdout)
+        self.assertFalse(os.path.lexists(launcher_link))
+        self.assertFalse(os.path.lexists(status_link))
+        self.assertFalse(os.path.exists(os.path.join(
+            self.home, ".local/share/cen-harness-hud/0.5.0")))
+        self.assertEqual(self.read("unrelated-user-file"), "keep\n")
+
+        r = self.install("--codex")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(os.path.islink(status_link))
+        self.assertFalse(os.path.lexists(launcher_link))
 
 
 class CodexCustomHomeTests(Base):
@@ -1902,10 +1970,8 @@ class CodexTelemetryDisplayTests(unittest.TestCase):
         sys.path.insert(0, cls._codex_dir)
         import publisher as pub
         import telemetry as tel
-        import launcher as lch
         cls.pub = pub
         cls.tel = tel
-        cls.lch = lch
 
     @classmethod
     def tearDownClass(cls):
@@ -1965,40 +2031,6 @@ class CodexTelemetryDisplayTests(unittest.TestCase):
         self.assertEqual(tok["cen_codex_weekly"], "—")
         self.assertIsNone(tok["cen_codex_window_1"])
         self.assertIsNone(tok["cen_codex_window_2"])
-
-    def test_cleanup_skips_newer_registration(self):
-        calls = []
-        with unittest.mock.patch.object(
-                self.lch, "pane_get_tokens",
-                return_value={"cen_codex_profile": "NEWERREG@999"}):
-            with unittest.mock.patch.object(
-                    self.lch, "report_metadata",
-                    side_effect=lambda *a: calls.append(a)):
-                performed = self.lch.ownership_aware_cleanup(
-                    "/tmp/sock-unused", "pane-1", "OLDERREG@123")
-        self.assertFalse(performed)
-        self.assertEqual(calls, [])
-
-    def test_cleanup_failcloses_weekly_and_retires_old_tokens(self):
-        recorded = []
-        own = "AAAA1111BBBB@4242"
-        with unittest.mock.patch.object(
-                self.lch, "pane_get_tokens",
-                return_value={"cen_codex_profile": own}):
-            with unittest.mock.patch.object(
-                    self.lch, "report_metadata",
-                    side_effect=lambda *a: recorded.append(a)):
-                performed = self.lch.ownership_aware_cleanup(
-                    "/tmp/sock-unused", "pane-1", own)
-        self.assertTrue(performed)
-        self.assertEqual(recorded[1][4], {
-            "cen_codex_identity": "—",
-            "cen_codex_weekly": "—",
-            "cen_codex_window_1": None,
-            "cen_codex_window_2": None,
-            "cen_codex_summary": None,
-        })
-
 
 class InstallerMigrationTests(Base):
     """Legacy-shape migration + drift-manifest retirement (synthetic only)."""

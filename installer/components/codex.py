@@ -29,7 +29,6 @@ STATUS_LINE_LITERAL = ['  "{}",'.format(v) for v in STATUS_LINE_DESIRED]
 
 def _command_symlinks(ctx) -> list:
     return [
-        ("cen-codex", ctx.codex_launcher_installed),
         ("cen-codex-status", ctx.codex_status_installed),
     ]
 

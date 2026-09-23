@@ -67,7 +67,7 @@ def run_doctor(ctx: Context, out=print) -> int:
         rec("product-root", "SKIP", "no install root present")
 
     # command symlinks
-    for name in ("cen-hud", "cen-codex", "cen-codex-status"):
+    for name in ("cen-hud", "cen-codex-status"):
         link = os.path.join(ctx.bin_dir, name)
         if not os.path.lexists(link):
             rec(f"command:{name}", "SKIP", "absent")
