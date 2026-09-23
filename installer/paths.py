@@ -20,10 +20,13 @@ class ComponentError(Exception):
 
 
 class Context:
-    def __init__(self, home: str, source_root: str):
+    def __init__(self, home: str, source_root: str, codex_homes=None):
         self.home = os.path.realpath(home)
         self.source_root = os.path.realpath(source_root)
         self.version = read_version(self.source_root)
+        self.codex_extra_homes = normalize_codex_homes(
+            self.home, codex_homes
+        )
         self.share_root = os.path.join(
             self.home, ".local", "share", "cen-harness-hud"
         )
@@ -116,6 +119,57 @@ def read_version(source_root: str) -> str:
     if not v:
         raise ComponentError("VERSION file is empty")
     return v
+
+
+def normalize_codex_homes(home: str, values=None) -> tuple:
+    """Validate and canonicalize explicitly supplied extra Codex homes.
+
+    Extra profiles are deliberately explicit and must already exist below the
+    active HOME. The default ``~/.codex`` is handled by the normal Codex
+    component and is therefore removed from the extra set. No filesystem is
+    created or changed here; callers can safely invoke this during preflight.
+    """
+    root = os.path.realpath(home)
+    default = os.path.realpath(os.path.join(root, ".codex"))
+    result = []
+    seen = set()
+    for raw in values or ():
+        if not isinstance(raw, str) or not raw.strip():
+            raise ComponentError("codex: --codex-home requires a non-empty path")
+        value = raw.strip()
+        if value == "~":
+            candidate = root
+        elif value.startswith("~/"):
+            candidate = os.path.join(root, value[2:])
+        else:
+            candidate = os.path.expanduser(value)
+        if not os.path.isabs(candidate):
+            candidate = os.path.abspath(candidate)
+        resolved = os.path.realpath(candidate)
+        if resolved == default:
+            continue
+        if resolved == root:
+            raise ComponentError(
+                "codex: --codex-home must identify a profile directory "
+                "below HOME"
+            )
+        try:
+            inside_home = os.path.commonpath((root, resolved)) == root
+        except ValueError:
+            inside_home = False
+        if not inside_home:
+            raise ComponentError(
+                "codex: --codex-home must be inside HOME"
+            )
+        if not os.path.isdir(resolved):
+            raise ComponentError(
+                "codex: --codex-home must be an existing directory"
+            )
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        result.append(resolved)
+    return tuple(result)
 
 
 # ── Filesystem primitives ─────────────────────────────────────────────────────

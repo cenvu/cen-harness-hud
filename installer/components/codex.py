@@ -218,6 +218,119 @@ def _plan_hooks_feature(path, text, actions, notes):
         )
 
 
+def _reject_unsafe_custom_file(path: str) -> None:
+    """Do not replace a custom profile file through a symlink or directory."""
+    if os.path.lexists(path) and (
+            os.path.islink(path) or not os.path.isfile(path)):
+        raise ConflictError(
+            "codex: custom profile target is not a regular file; refusing "
+            "to overwrite"
+        )
+
+
+def _plan_session_hook(ctx, hooks_path, actions, notes, claims,
+                       reject_unsafe=False):
+    if reject_unsafe:
+        _reject_unsafe_custom_file(hooks_path)
+    command = _session_hook_command(ctx)
+    if not os.path.exists(hooks_path):
+        desired, _ = _desired_hooks({}, command)
+        actions.append({
+            "type": "write_json_new",
+            "path": hooks_path,
+            "data": desired,
+            "mode": 0o600 if reject_unsafe else 0o644,
+            "semantics": [
+                _hook_semantic(
+                    hooks_path, command, "insert",
+                    containers=[
+                        {"path": "hooks", "keys": ["SessionStart"],
+                         "values": {"SessionStart": desired["hooks"][
+                             "SessionStart"]}},
+                        {"path": "hooks.SessionStart",
+                         "keys": [], "kind": "list"}]),
+            ],
+        })
+        return
+
+    try:
+        current = patching.load_json(hooks_path)
+        stripped, legacy_removed = _strip_legacy_hooks(
+            current, command, ctx)
+        had_hooks = isinstance(current.get("hooks"), dict)
+        had_ss = isinstance((current.get("hooks") or {}).get(
+            "SessionStart"), list)
+        desired, changed = _desired_hooks(stripped, command)
+        changed = changed or legacy_removed
+    except ComponentError:
+        raise
+    except Exception as e:
+        raise ComponentError(
+            f"codex: malformed hooks.json ({e}); fail-closed"
+        )
+    if changed:
+        containers = []
+        if not had_hooks:
+            containers.append(
+                {"path": "hooks", "keys": ["SessionStart"],
+                 "values": {"SessionStart": desired["hooks"][
+                     "SessionStart"]}})
+        if not had_ss:
+            containers.append({"path": "hooks.SessionStart",
+                               "keys": [], "kind": "list"})
+        basis = "migrate" if legacy_removed else "insert"
+        actions.append({
+            "type": "patch_json_document",
+            "path": hooks_path,
+            "expected_current_data": current,
+            "desired_data": desired,
+            "backup_name": "hooks.json",
+            "semantic": _hook_semantic(hooks_path, command, basis,
+                                       containers=containers),
+        })
+        if legacy_removed:
+            notes.append(
+                "codex SessionStart hook: proven older CEN entry "
+                "migrated — exactly one current hook afterwards"
+            )
+    else:
+        notes.append(
+            "codex SessionStart telemetry hook already CEN-owned — no-op"
+        )
+        claims.append(_hook_semantic(hooks_path, command, "adopt"))
+
+
+def _plan_custom_home(ctx, codex_home, actions, notes, claims):
+    """Plan only telemetry prerequisites for one explicit extra profile."""
+    config_path = os.path.join(codex_home, "config.toml")
+    if not os.path.lexists(config_path):
+        actions.append({
+            "type": "write_text_new",
+            "path": config_path,
+            "text": "[features]\nhooks = true\n",
+            "mode": 0o600,
+            "semantics": [
+                _toml_semantic(config_path, ("features",), "hooks",
+                               True, "insert"),
+            ],
+        })
+    else:
+        _reject_unsafe_custom_file(config_path)
+        try:
+            with open(config_path, "r") as f:
+                text = f.read()
+        except OSError as e:
+            raise ComponentError(
+                f"codex: cannot read custom profile config ({e}); "
+                "fail-closed"
+            )
+        _plan_hooks_feature(config_path, text, actions, notes)
+
+    hooks_path = os.path.join(codex_home, "hooks.json")
+    _plan_session_hook(ctx, hooks_path, actions, notes, claims,
+                       reject_unsafe=True)
+
+
 def plan(ctx) -> dict:
     actions = []
     notes = []
@@ -254,74 +367,13 @@ def plan(ctx) -> dict:
 
     # 2. Native SessionStart hook learns the actual profile and provides a
     # stable /clear completion refresh hook. Existing unrelated hooks survive.
-    hooks_path = ctx.codex_hooks_path
-    command = _session_hook_command(ctx)
-    if not os.path.exists(hooks_path):
-        desired, _ = _desired_hooks({}, command)
-        actions.append({
-            "type": "write_json_new",
-            "path": hooks_path,
-            "data": desired,
-            "mode": 0o644,
-            "semantics": [
-                _hook_semantic(
-                    hooks_path, command, "insert",
-                    containers=[
-                        {"path": "hooks", "keys": ["SessionStart"],
-                         "values": {"SessionStart": desired["hooks"][
-                             "SessionStart"]}},
-                        {"path": "hooks.SessionStart",
-                         "keys": [], "kind": "list"}]),
-            ],
-        })
-    else:
-        try:
-            current = patching.load_json(hooks_path)
-            stripped, legacy_removed = _strip_legacy_hooks(
-                current, command, ctx)
-            had_hooks = isinstance(current.get("hooks"), dict)
-            had_ss = isinstance((current.get("hooks") or {}).get(
-                "SessionStart"), list)
-            desired, changed = _desired_hooks(stripped, command)
-            changed = changed or legacy_removed
-        except ComponentError:
-            raise
-        except Exception as e:
-            raise ComponentError(
-                f"codex: malformed hooks.json ({e}); fail-closed"
-            )
-        if changed:
-            containers = []
-            if not had_hooks:
-                containers.append(
-                    {"path": "hooks", "keys": ["SessionStart"],
-                     "values": {"SessionStart": desired["hooks"][
-                         "SessionStart"]}})
-            if not had_ss:
-                containers.append({"path": "hooks.SessionStart",
-                                   "keys": [], "kind": "list"})
-            basis = "migrate" if legacy_removed else "insert"
-            actions.append({
-                "type": "patch_json_document",
-                "path": hooks_path,
-                "expected_current_data": current,
-                "desired_data": desired,
-                "backup_name": "hooks.json",
-                "semantic": _hook_semantic(hooks_path, command, basis,
-                                           containers=containers),
-            })
-            if legacy_removed:
-                notes.append(
-                    "codex SessionStart hook: proven older CEN entry "
-                    "migrated — exactly one current hook afterwards"
-                )
-        else:
-            notes.append(
-                "codex SessionStart telemetry hook already CEN-owned — no-op"
-            )
-            claims.append(_hook_semantic(hooks_path, command, "adopt"))
+    _plan_session_hook(ctx, ctx.codex_hooks_path, actions, notes, claims)
 
-    # 3. Command symlinks into installed product root.
+    # 3. Explicit alternate profiles receive only telemetry prerequisites.
+    for codex_home in ctx.codex_extra_homes:
+        _plan_custom_home(ctx, codex_home, actions, notes, claims)
+
+    # 4. Command symlinks into installed product root.
     for name, target in _command_symlinks(ctx):
         link = os.path.join(ctx.bin_dir, name)
         cls = patching.classify_symlink(link, target, cen_roots)

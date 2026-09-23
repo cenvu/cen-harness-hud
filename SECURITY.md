@@ -22,6 +22,11 @@ CEN HUD runs entirely as your local user, with no elevated privileges and no
 - never requires or performs credential migration
 - patches only the exact config keys it owns; foreign customizations abort
   the install before any mutation
+- explicitly supplied custom `CODEX_HOME` paths must already exist inside
+  `HOME`; CEN does not authenticate or create Codex profiles
+- for custom profiles, CEN owns only its telemetry hook and the exact
+  `[features].hooks` key it changes; the official Herdr Codex hook remains
+  separately owned by Herdr
 
 **Runtime boundary:**
 
@@ -30,6 +35,10 @@ CEN HUD runs entirely as your local user, with no elevated privileges and no
 - the Codex integration invokes the external Codex app-server over stdio; it
   implements no HTTP client of its own (whether the app-server itself uses
   the network is Codex's behavior, not CEN HUD's)
+- native Codex session identity remains the official `herdr:codex` source;
+  CEN does not report or impersonate Herdr agent sessions. CEN's SessionStart
+  hook records only a private hashed session-to-`CODEX_HOME` mapping for local
+  telemetry publication
 - the optional Pi balance extension is an explicit network client: it obtains
   your existing DeepSeek API key through the supported Pi/environment
   credential surface, uses it solely as Bearer auth for DeepSeek's official

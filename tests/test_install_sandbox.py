@@ -298,6 +298,256 @@ class InstallTests(Base):
         self.assertIn("harness binary not found", r.stdout)
 
 
+class CodexCustomHomeTests(Base):
+    """Explicit alternate Codex homes receive telemetry-only ownership."""
+
+    def profile(self, name):
+        path = os.path.join(self.home, "profiles", name)
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def custom_install(self, *homes):
+        args = ["--codex"]
+        for home in homes:
+            args.extend(("--codex-home", home))
+        return self.install(*args)
+
+    def cen_hook_command(self):
+        from installer.paths import Context
+
+        return Context(self.home, REPO).codex_session_hook_installed
+
+    def hooks_commands(self, profile):
+        with open(os.path.join(profile, "hooks.json")) as f:
+            data = json.load(f)
+        commands = []
+        for entry in (data.get("hooks") or {}).get("SessionStart", []):
+            for hook in entry.get("hooks", []) if isinstance(entry, dict) else []:
+                if isinstance(hook, dict) and hook.get("type") == "command":
+                    commands.append(hook.get("command"))
+        return commands
+
+    def config_data(self, profile):
+        with open(os.path.join(profile, "config.toml")) as f:
+            return tomllib.loads(f.read())
+
+    def custom_records(self, profile):
+        prefix = "~/" + os.path.relpath(profile, self.home) + "/"
+        return [r for r in self.read_manifest()["semantic_patches"]
+                if r["path"].startswith(prefix)]
+
+    def test_custom_home_gets_hooks_only_and_default_footer_remains(self):
+        profile = self.profile("alpha")
+        original_config = '[tui]\nstatus_line = ["user-row"]\n'
+        original_hooks = {
+            "hooks": {
+                "SessionStart": [{"hooks": [{
+                    "type": "command", "command": "user-session"
+                }]}],
+                "Other": [{"hooks": [{
+                    "type": "command", "command": "user-other"
+                }]}],
+            }
+        }
+        self.write("profiles/alpha/config.toml", original_config, 0o640)
+        self.write("profiles/alpha/hooks.json", json.dumps(original_hooks),
+                   0o644)
+
+        r = self.custom_install(profile)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        default = tomllib.loads(self.read(".codex/config.toml"))
+        self.assertEqual(default["tui"]["status_line"], CODEX_DESIRED)
+        custom = self.config_data(profile)
+        self.assertEqual(custom["tui"]["status_line"], ["user-row"])
+        self.assertTrue(custom["features"]["hooks"])
+        commands = self.hooks_commands(profile)
+        self.assertEqual(commands.count(self.cen_hook_command()), 1)
+        self.assertIn("user-session", commands)
+        with open(os.path.join(profile, "hooks.json")) as f:
+            installed_hooks = json.load(f)
+        self.assertEqual(
+            installed_hooks["hooks"]["Other"][0]["hooks"][0]["command"],
+            "user-other",
+        )
+        self.assertEqual(
+            {r["op"] for r in self.custom_records(profile)},
+            {"TOML_KEY", "CODEX_SESSION_HOOK"},
+        )
+
+        self.assertEqual(self.cli("uninstall").returncode, 0)
+        with open(os.path.join(profile, "config.toml")) as f:
+            self.assertEqual(f.read(), original_config)
+        with open(os.path.join(profile, "hooks.json")) as f:
+            self.assertEqual(json.load(f), original_hooks)
+        self.assertEqual(stat.S_IMODE(os.stat(
+            os.path.join(profile, "config.toml")).st_mode), 0o640)
+        self.assertEqual(stat.S_IMODE(os.stat(
+            os.path.join(profile, "hooks.json")).st_mode), 0o644)
+
+    def test_multiple_duplicate_and_default_custom_paths_are_deduplicated(self):
+        alpha = self.profile("alpha")
+        beta = self.profile("beta")
+        default = os.path.join(self.home, ".codex")
+        r = self.custom_install(alpha, beta, alpha, default, default)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for profile in (alpha, beta):
+            self.assertTrue(self.config_data(profile)["features"]["hooks"])
+            self.assertEqual(
+                self.hooks_commands(profile).count(self.cen_hook_command()), 1
+            )
+            for name in ("config.toml", "hooks.json"):
+                self.assertEqual(stat.S_IMODE(os.stat(
+                    os.path.join(profile, name)).st_mode), 0o600)
+        for profile in (alpha, beta):
+            rel = "~/" + os.path.relpath(profile, self.home) + "/"
+            records = [r for r in self.read_manifest()["semantic_patches"]
+                       if r["path"].startswith(rel)]
+            self.assertEqual(len(records), 2)
+        self.assertEqual(self.cli("uninstall").returncode, 0)
+        self.assertFalse(os.path.exists(os.path.join(alpha, "config.toml")))
+        self.assertFalse(os.path.exists(os.path.join(beta, "hooks.json")))
+
+    def test_invalid_custom_home_fails_before_any_mutation(self):
+        cases = ("missing", "file", "outside")
+        for label in cases:
+            with self.subTest(label=label):
+                self.home = os.path.join(self.base, label)
+                os.makedirs(self.home)
+                if label == "missing":
+                    target = os.path.join(self.home, "profiles", "gone")
+                elif label == "file":
+                    target = os.path.join(self.home, "profiles", "file")
+                    os.makedirs(os.path.dirname(target))
+                    with open(target, "w") as f:
+                        f.write("foreign")
+                else:
+                    target = os.path.join(self.base, "outside")
+                    os.makedirs(target, exist_ok=True)
+                r = self.custom_install(target)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertFalse(os.path.exists(self.manifest_path()))
+                self.assertFalse(os.path.exists(os.path.join(
+                    self.home, ".local/share/cen-harness-hud")))
+
+    def test_custom_home_requires_explicit_codex_component(self):
+        profile = self.profile("alpha")
+        r = self.cli("install", "--source-root", REPO,
+                     "--codex-home", profile)
+        self.assertEqual(r.returncode, 1)
+        self.assertFalse(os.path.exists(self.manifest_path()))
+
+    def test_official_herdr_hook_survives_cen_install_and_uninstall(self):
+        profile = self.profile("official")
+        original_config = "[features]\nhooks = true\n"
+        original_hooks = {
+            "hooks": {
+                "SessionStart": [{"hooks": [{
+                    "type": "command",
+                    "command": "herdr-agent-state.sh session",
+                    "timeout": 10,
+                }]}],
+                "Other": [{"hooks": [{
+                    "type": "command", "command": "user-other"
+                }]}],
+            }
+        }
+        self.write("profiles/official/config.toml", original_config, 0o640)
+        self.write("profiles/official/hooks.json", json.dumps(original_hooks),
+                   0o644)
+        r = self.custom_install(profile)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        commands = self.hooks_commands(profile)
+        self.assertIn("herdr-agent-state.sh session", commands)
+        self.assertEqual(commands.count(self.cen_hook_command()), 1)
+        self.assertEqual(self.cli("uninstall").returncode, 0)
+        with open(os.path.join(profile, "hooks.json")) as f:
+            self.assertEqual(json.load(f), original_hooks)
+        self.assertEqual(stat.S_IMODE(os.stat(
+            os.path.join(profile, "hooks.json")).st_mode), 0o644)
+
+    def test_existing_true_feature_and_exact_cen_hook_are_not_duplicated(self):
+        profile = self.profile("adopt")
+        command = self.cen_hook_command()
+        self.write("profiles/adopt/config.toml", "[features]\nhooks = true\n")
+        self.write("profiles/adopt/hooks.json", json.dumps({
+            "hooks": {"SessionStart": [{"hooks": [{
+                "type": "command", "command": command
+            }]}]}
+        }))
+        r = self.custom_install(profile)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.hooks_commands(profile).count(command), 1)
+        self.assertEqual([
+            r["op"] for r in self.custom_records(profile)
+        ], ["CODEX_SESSION_HOOK"])
+
+    def test_malformed_custom_config_or_hooks_fails_closed(self):
+        for kind in ("config", "hooks"):
+            with self.subTest(kind=kind):
+                self.home = os.path.join(self.base, kind)
+                os.makedirs(self.home)
+                profile = self.profile("broken")
+                if kind == "config":
+                    path = self.write("profiles/broken/config.toml",
+                                      "[features\nhooks = true\n")
+                else:
+                    self.write("profiles/broken/config.toml",
+                               "[features]\nhooks = true\n")
+                    path = self.write("profiles/broken/hooks.json", "{oops")
+                with open(path) as f:
+                    before = f.read()
+                r = self.custom_install(profile)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                with open(path) as f:
+                    self.assertEqual(f.read(), before)
+                self.assertFalse(os.path.exists(self.manifest_path()))
+
+    def test_foreign_hooks_feature_is_not_overwritten(self):
+        profile = self.profile("foreign")
+        original = "[features]\nhooks = false\n"
+        path = self.write("profiles/foreign/config.toml", original)
+        r = self.custom_install(profile)
+        self.assertEqual(r.returncode, 1)
+        with open(path) as f:
+            self.assertEqual(f.read(), original)
+        self.assertFalse(os.path.exists(self.manifest_path()))
+
+    def test_custom_user_edits_survive_semantic_uninstall(self):
+        profile = self.profile("edited")
+        self.write("profiles/edited/config.toml", "[model]\nname = \"keep\"\n")
+        self.write("profiles/edited/hooks.json", "{}")
+        self.assertEqual(self.custom_install(profile).returncode, 0)
+        with open(os.path.join(profile, "config.toml"), "a") as f:
+            f.write("\n[user]\nnote = \"keep\"\n")
+        with open(os.path.join(profile, "hooks.json")) as f:
+            hooks = json.load(f)
+        hooks["UserEvent"] = [{"hooks": [{"type": "command",
+                                             "command": "keep-me"}]}]
+        with open(os.path.join(profile, "hooks.json"), "w") as f:
+            json.dump(hooks, f)
+        self.assertEqual(self.cli("uninstall").returncode, 0)
+        config = self.config_data(profile)
+        self.assertEqual(config["user"]["note"], "keep")
+        self.assertNotIn("features", config)
+        with open(os.path.join(profile, "hooks.json")) as f:
+            after = json.load(f)
+        self.assertIn("UserEvent", after)
+        self.assertNotIn("SessionStart", after.get("hooks", {}))
+
+    def test_conflict_in_one_custom_home_prevents_whole_run(self):
+        good = self.profile("good")
+        bad = self.profile("bad")
+        bad_path = self.write("profiles/bad/config.toml",
+                              "[features\nbroken = true\n")
+        r = self.custom_install(good, bad)
+        self.assertEqual(r.returncode, 1)
+        self.assertFalse(os.path.exists(os.path.join(good, "config.toml")))
+        self.assertFalse(os.path.exists(os.path.join(good, "hooks.json")))
+        self.assertFalse(os.path.exists(self.manifest_path()))
+        with open(bad_path) as f:
+            self.assertEqual(f.read(), "[features\nbroken = true\n")
+
+
 class ConflictAndMalformedTests(Base):
     FOREIGN_AGY = '{"statusLine":{"type":"command","command":"starship agy"}}'
 

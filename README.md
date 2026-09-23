@@ -16,7 +16,7 @@ no resident daemon of its own, no database.
 | Integration | Display surface | Shows |
 |---|---|---|
 | **AGY** (Antigravity CLI) | Native statusline footer + Herdr sidebar card | Account identity/plan, four quota pools (Gemini 5H/W, Claude/GPT 5H/W), reset countdowns |
-| **Codex CLI** | Native TUI status line, one-shot CLI helper, Herdr sidebar card | Native footer: model/reasoning, native run status, context remaining, short-window and weekly remaining % (no reset countdown in the native footer through current built-in items); helper: sanitized short account alias + plan with structured quota/reset info; Herdr card: native lifecycle state, alias/plan, WEEKLY remaining % with reset countdown snapshot — short-window quota stays native-footer-only and is NOT duplicated in Herdr |
+| **Codex CLI** | Native TUI status line, one-shot CLI helper, Herdr sidebar card | Native footer: model/reasoning, native run status, context remaining, short-window and weekly remaining % (no reset countdown in the native footer through current built-in items); helper: sanitized short account alias + plan with structured quota/reset info; Herdr card: native lifecycle state, alias/plan, WEEKLY remaining % with reset countdown snapshot — short-window quota stays native-footer-only and is NOT duplicated in Herdr. Explicit raw `CODEX_HOME` profiles can receive CEN telemetry prerequisites; native session identity remains owned by the official Herdr Codex integration. |
 | **Pi Coding Agent** | Native Pi footer widget | DeepSeek key fingerprint and PAYG balance |
 | **OpenCode** | Herdr sidebar card (requires Herdr) | Herdr-native lifecycle state. State is supplied by Herdr's own OpenCode detection, not a CEN OpenCode publisher. Live validation observed idle/working/done; other Herdr-native states render when detected |
 | **Claude Code** | Native StatusLine + Herdr sidebar card | Herdr-native lifecycle state; model/context from structured StatusLine JSON; optional five-hour/seven-day Claude rate-limit LEFT% and reset countdown when supplied; no identity or plan row; no fabricated quota when unavailable |
@@ -30,6 +30,16 @@ Claude StatusLine JSON payload. When `ANTHROPIC_BASE_URL` is present, the
 Claude adapter suppresses Claude.ai subscription quota and reset metadata.
 CEN HUD does not currently provide a separate DeepSeek or other
 custom-provider quota adapter for dsclaude.
+
+### Raw Codex multi-profile support
+
+Codex profile selection uses the normal `CODEX_HOME` environment variable. CEN
+HUD can add telemetry prerequisites to explicitly supplied, existing
+HOME-relative profile directories through repeatable `--codex-home` installer
+arguments. The official Herdr Codex integration owns native session identity;
+CEN HUD maps that structured session to its profile for local attribution.
+Raw `CODEX_HOME` profiles no longer require the legacy `cen-codex` launcher for
+HUD attribution when both integrations are installed.
 
 ## Platform support
 

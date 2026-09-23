@@ -51,6 +51,19 @@ The code is POSIX-oriented, but no claims are made until tested.
   through the conservative whole-file path.
 - Upgrades remain uninstall-first.
 
+## Codex raw multi-profile support
+
+- Explicit existing custom `CODEX_HOME` directories are supported through
+  repeatable `--codex-home` installer arguments.
+- The official Herdr Codex integration owns native session identity; the CEN
+  SessionStart hook owns only the local session-to-profile telemetry mapping.
+- Codex `SessionStart` is turn-gated. A newly opened TUI may show no account or
+  quota metadata until the first actual turn begins.
+- Raw profile HUD attribution does not require `cen-codex` when both official
+  Herdr integration and CEN custom-home telemetry support are installed.
+- The compact Herdr quota surface is weekly/7D. Unavailable quota remains
+  unavailable; CEN does not fabricate a value.
+
 ## Codex telemetry behavior
 
 - The Herdr weekly countdown is snapshot/event refreshed, not a live ticker.

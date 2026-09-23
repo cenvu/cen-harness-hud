@@ -16,7 +16,7 @@ sys.path.insert(0, SOURCE_ROOT)
 
 from installer import doctor as doctor_mod # noqa: E402
 from installer import transaction # noqa: E402
-from installer.paths import Context # noqa: E402
+from installer.paths import ComponentError, Context # noqa: E402
 
 COMPONENT_FLAGS = ("agy", "claude", "codex", "pi", "herdr")
 
@@ -45,6 +45,11 @@ def main(argv=None) -> int:
     for flag in COMPONENT_FLAGS:
         p_inst.add_argument(f"--{flag}", action="store_true",
                             help=f"include {flag} component")
+    p_inst.add_argument(
+        "--codex-home", action="append", default=[], metavar="PATH",
+        help="include an existing HOME-relative Codex profile (repeatable; "
+             "requires --codex)",
+    )
 
     sub.add_parser("doctor", help="strictly read-only verification")
     p_un = sub.add_parser("uninstall", help="drift-safe uninstall")
@@ -64,7 +69,19 @@ def main(argv=None) -> int:
         return 1
 
     source_root = getattr(args, "source_root", None) or SOURCE_ROOT
-    ctx = Context(home=home, source_root=source_root)
+    raw_codex_homes = getattr(args, "codex_home", [])
+    if raw_codex_homes and not getattr(args, "codex", False):
+        print("cen-hud: --codex-home requires --codex", file=sys.stderr)
+        return 1
+    try:
+        ctx = Context(
+            home=home,
+            source_root=source_root,
+            codex_homes=raw_codex_homes,
+        )
+    except ComponentError as e:
+        print("cen-hud: " + str(e), file=sys.stderr)
+        return 1
 
     if args.cmd == "install":
         explicit = [f for f in COMPONENT_FLAGS if getattr(args, f)]

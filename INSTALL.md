@@ -78,10 +78,46 @@ Installing the Codex component may:
 4. preserve your unrelated existing hooks
 5. fail closed (CONFLICT) if the owned config surface is foreign/custom
 
-CEN HUD does not install or authenticate Codex. `cen-codex` remains
-available as a profile-aware launcher, but telemetry does NOT require it
-for normal generic Codex sessions when native session ownership can be
-proven.
+CEN HUD does not install or authenticate Codex. `cen-codex` remains installed
+as a legacy compatibility launcher in v0.5.0, but raw `CODEX_HOME` profiles no
+longer require it when the official Herdr integration and CEN custom-home
+telemetry hook are installed. `cen-codex-status` remains supported.
+
+### Raw Codex multi-profile support
+
+For an existing custom profile directory inside your home directory, add CEN's
+telemetry prerequisites with repeatable `--codex-home` arguments:
+
+```sh
+./install.sh --codex \
+  --codex-home "$HOME/path/to/profile-a" \
+  --codex-home "$HOME/path/to/profile-b"
+```
+
+Each supplied directory must already exist, must be inside `HOME`, and is
+canonicalized and deduplicated. The option does not authenticate Codex, create
+an account or profile, or change the custom profile's TUI `status_line`. It
+adds only the CEN hook prerequisites needed for session-to-profile telemetry.
+The default `~/.codex` profile continues to be handled by the normal Codex
+component.
+
+For native Herdr session identity, install and verify the official Herdr Codex
+integration for each custom profile through Herdr's supported command:
+
+```sh
+CODEX_HOME="$HOME/path/to/profile-a" herdr integration install codex
+CODEX_HOME="$HOME/path/to/profile-a" herdr integration status
+```
+
+CEN HUD does not install, copy, or own Herdr's hook. Herdr owns the native
+`herdr:codex` session identity; CEN owns only its private session-to-profile
+mapping and telemetry publication.
+
+A newly opened Codex TUI may initially have no HUD account or quota metadata.
+Codex `SessionStart` is turn-gated: after the first actual turn begins, the
+official Herdr session identity and the CEN profile mapping can populate the
+HUD. CEN does not send a model request itself, and startup dash values are not
+an installation error.
 
 ## Install
 

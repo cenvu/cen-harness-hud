@@ -26,6 +26,13 @@ content is stored in any of the above. Quota snapshot metadata IS persisted
 locally as described; only money balances (PAYG cash amounts) are never
 stored.
 
+When you explicitly supply an additional existing `CODEX_HOME`, its
+HOME-relative filesystem path may appear in private CEN semantic ownership and
+session-mapping state. These directories remain mode `0700` with files mode
+`0600`. The raw Codex session id is hash-keyed where persisted. CEN never reads
+`auth.json`; native Herdr session identity is transient Herdr-managed state,
+separate from CEN's local mapping.
+
 Only the persistent AGY/Codex state above uses those runtime-state disk
 permissions. The Claude adapter persists no runtime telemetry. The Pi balance
 integration persists nothing (see below).

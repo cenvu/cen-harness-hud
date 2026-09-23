@@ -301,6 +301,39 @@ class PublisherLifecycleTests(unittest.TestCase):
 
 
 class SessionHookTests(unittest.TestCase):
+    def test_two_custom_session_starts_map_to_distinct_homes(self):
+        with tempfile.TemporaryDirectory() as home:
+            first_home = os.path.join(home, "profiles", "first")
+            second_home = os.path.join(home, "profiles", "second")
+            os.makedirs(first_home)
+            os.makedirs(second_home)
+
+            def run_hook(session_id, codex_home):
+                payload = json.dumps({
+                    "hook_event_name": "SessionStart",
+                    "session_id": session_id,
+                    "source": "startup",
+                })
+                fake_stdin = mock.Mock()
+                fake_stdin.read.return_value = payload
+                with mock.patch.dict(os.environ, {
+                        "HOME": home,
+                        "CODEX_HOME": codex_home,
+                }, clear=True), \
+                     mock.patch.object(session_hook.sys, "stdin", fake_stdin):
+                    self.assertEqual(session_hook.main(), 0)
+
+            run_hook("first-session", first_home)
+            run_hook("second-session", second_home)
+            self.assertEqual(
+                telemetry.read_session_mapping(home, "first-session"),
+                os.path.realpath(first_home),
+            )
+            self.assertEqual(
+                telemetry.read_session_mapping(home, "second-session"),
+                os.path.realpath(second_home),
+            )
+
     def test_clear_writes_actual_profile_and_triggers_once(self):
         with tempfile.TemporaryDirectory() as home:
             payload = json.dumps({
